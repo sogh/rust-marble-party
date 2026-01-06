@@ -1,18 +1,19 @@
 use bevy::prelude::*;
 
+mod track;
+use track::{Track, SpiralTube, Segment};
+
 // ============================================================================
 // CONSTANTS
 // ============================================================================
 
 // Steel ball bearing physics
-const GRAVITY: Vec3 = Vec3::new(0.0, -20.0, 0.0); // Stronger gravity for snappier feel
-const MARBLE_RADIUS: f32 = 0.2; // Smaller ball bearing
-const TRACK_RADIUS: f32 = 1.0; // Tighter tube
-const SMOOTH_K: f32 = 0.5;
-const RESTITUTION: f32 = 0.6; // Steel bounces well against track
-const MARBLE_RESTITUTION: f32 = 0.9; // Steel-on-steel bounces very well
-const FRICTION: f32 = 0.995; // Steel on metal is slippery
-const GRADIENT_EPSILON: f32 = 0.01;
+const GRAVITY: Vec3 = Vec3::new(0.0, -20.0, 0.0);
+const MARBLE_RADIUS: f32 = 0.2;
+const TRACK_RADIUS: f32 = 1.0;
+const RESTITUTION: f32 = 0.6;
+const MARBLE_RESTITUTION: f32 = 0.9;
+const FRICTION: f32 = 0.995;
 
 // ============================================================================
 // COMPONENTS
@@ -24,102 +25,6 @@ struct Marble {
     radius: f32,
 }
 
-#[derive(Resource)]
-struct TrackSpine {
-    points: Vec<Vec3>,
-    radius: f32,
-}
-
-impl Default for TrackSpine {
-    fn default() -> Self {
-        Self {
-            points: create_track_spine(),
-            radius: TRACK_RADIUS,
-        }
-    }
-}
-
-// ============================================================================
-// SDF FUNCTIONS
-// ============================================================================
-
-/// Signed distance from point `p` to a capsule defined by endpoints `a` and `b` with radius `r`
-fn capsule_sdf(p: Vec3, a: Vec3, b: Vec3, r: f32) -> f32 {
-    let pa = p - a;
-    let ba = b - a;
-    let h = (pa.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
-    (pa - ba * h).length() - r
-}
-
-/// Smooth minimum for blending SDFs
-/// k controls the smoothness of the blend (larger = smoother)
-fn smooth_min(a: f32, b: f32, k: f32) -> f32 {
-    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
-    b.lerp(a, h) - k * h * (1.0 - h)
-}
-
-/// Calculate the distance from a point to the INSIDE of the track tube
-/// Returns negative when inside the tube (no collision), positive when penetrating the wall
-fn track_sdf(p: Vec3, spine: &[Vec3], radius: f32) -> f32 {
-    if spine.len() < 2 {
-        return f32::MAX;
-    }
-
-    let mut dist = capsule_sdf(p, spine[0], spine[1], radius);
-
-    for i in 1..spine.len() - 1 {
-        let segment_dist = capsule_sdf(p, spine[i], spine[i + 1], radius);
-        dist = smooth_min(dist, segment_dist, SMOOTH_K);
-    }
-
-    // Negate to make collision happen on the INSIDE of the tube
-    // Now: negative = inside tube (free space), positive = outside/in wall
-    -dist
-}
-
-/// Calculate the gradient (normal) of the SDF at point `p` using central differences
-fn track_sdf_gradient(p: Vec3, spine: &[Vec3], radius: f32) -> Vec3 {
-    let eps = GRADIENT_EPSILON;
-
-    let dx = track_sdf(p + Vec3::X * eps, spine, radius)
-        - track_sdf(p - Vec3::X * eps, spine, radius);
-    let dy = track_sdf(p + Vec3::Y * eps, spine, radius)
-        - track_sdf(p - Vec3::Y * eps, spine, radius);
-    let dz = track_sdf(p + Vec3::Z * eps, spine, radius)
-        - track_sdf(p - Vec3::Z * eps, spine, radius);
-
-    Vec3::new(dx, dy, dz).normalize_or_zero()
-}
-
-// ============================================================================
-// TRACK GENERATION
-// ============================================================================
-
-/// Create a fun roller-coaster-like track spine with consistent downward slope
-fn create_track_spine() -> Vec<Vec3> {
-    let mut points = Vec::new();
-    let segments = 150;
-
-    for i in 0..=segments {
-        let t = i as f32 / segments as f32;
-        let angle = t * std::f32::consts::TAU * 3.0; // 3 full loops
-
-        // Spiral with varying radius
-        let radius = 5.0 + 1.5 * (angle * 0.5).sin();
-        let x = radius * angle.cos();
-        let z = radius * angle.sin();
-
-        // Descending helix with some bumps for fun
-        let descent = 30.0 * (1.0 - t); // Steeper slope
-        let bumps = 0.5 * (angle * 2.0).cos(); // Small ripples, won't stop the marble
-        let y = descent + bumps + 2.0;
-
-        points.push(Vec3::new(x, y, z));
-    }
-
-    points
-}
-
 // ============================================================================
 // SYSTEMS
 // ============================================================================
@@ -129,11 +34,17 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Initialize track resource
-    commands.insert_resource(TrackSpine::default());
+    // Create track with spiral tube segment
+    let mut track = Track::new();
+    let spiral = SpiralTube::at_origin(3.0, 30.0, 5.0, TRACK_RADIUS);
 
-    // Spawn 8 marbles with different colors, staggered along the track start
-    let spine = create_track_spine();
+    // Get starting positions before moving spiral into track
+    let spine = spiral.spine().to_vec();
+
+    track.add_segment(Box::new(spiral));
+    commands.insert_resource(track);
+
+    // Spawn 8 marbles with different colors
     let marble_colors = [
         Color::srgb(0.9, 0.1, 0.1), // Red
         Color::srgb(0.1, 0.7, 0.1), // Green
@@ -147,7 +58,6 @@ fn setup(
 
     let mesh = meshes.add(Sphere::new(MARBLE_RADIUS));
     for (i, color) in marble_colors.iter().enumerate() {
-        // Stagger marbles along first few spine points
         let start_pos = spine[i * 2];
         commands.spawn((
             Mesh3d(mesh.clone()),
@@ -165,13 +75,13 @@ fn setup(
         ));
     }
 
-    // Spawn camera
+    // Camera
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(15.0, 12.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Spawn directional light
+    // Directional light
     commands.spawn((
         DirectionalLight {
             illuminance: 10000.0,
@@ -191,7 +101,7 @@ fn setup(
 /// Physics system: apply gravity, check SDF penetration, resolve collision
 fn marble_physics(
     time: Res<Time>,
-    track: Res<TrackSpine>,
+    track: Res<Track>,
     mut query: Query<(&mut Transform, &mut Marble)>,
 ) {
     let dt = time.delta_secs();
@@ -203,31 +113,29 @@ fn marble_physics(
         // Predict next position
         let next_pos = transform.translation + marble.velocity * dt;
 
-        // Check SDF penetration
-        let dist = track_sdf(next_pos, &track.points, track.radius);
+        // Check SDF penetration using new Track system
+        let dist = track.sdf(next_pos);
         let penetration = marble.radius - dist;
 
         if penetration > 0.0 {
             // Calculate normal via gradient
-            let normal = track_sdf_gradient(next_pos, &track.points, track.radius);
+            let normal = track.sdf_gradient(next_pos);
 
-            // Resolve penetration by pushing marble out
+            // Resolve penetration
             let corrected_pos = next_pos + normal * penetration;
 
-            // Decompose velocity into normal and tangent components
+            // Decompose velocity
             let vel_normal = normal * marble.velocity.dot(normal);
             let vel_tangent = marble.velocity - vel_normal;
 
-            // Apply restitution (bounce) to normal component
-            // Apply friction to tangent component
+            // Apply restitution and friction
             marble.velocity = vel_tangent * FRICTION - vel_normal * RESTITUTION;
-
             transform.translation = corrected_pos;
         } else {
             transform.translation = next_pos;
         }
 
-        // Rolling rotation based on velocity
+        // Rolling rotation
         if marble.velocity.length() > 0.01 {
             let speed = marble.velocity.length();
             let angular_speed = speed / marble.radius;
@@ -240,9 +148,8 @@ fn marble_physics(
     }
 }
 
-/// Marble-to-marble collision detection and response
+/// Marble-to-marble collision
 fn marble_collision(mut query: Query<(Entity, &mut Transform, &mut Marble)>) {
-    // Collect all marble data
     let mut marbles: Vec<(Entity, Vec3, Vec3, f32)> = query
         .iter()
         .map(|(e, t, m)| (e, t.translation, m.velocity, m.radius))
@@ -250,7 +157,6 @@ fn marble_collision(mut query: Query<(Entity, &mut Transform, &mut Marble)>) {
 
     let count = marbles.len();
 
-    // Check all pairs
     for i in 0..count {
         for j in (i + 1)..count {
             let (_, pos_i, vel_i, radius_i) = marbles[i];
@@ -261,22 +167,17 @@ fn marble_collision(mut query: Query<(Entity, &mut Transform, &mut Marble)>) {
             let min_dist = radius_i + radius_j;
 
             if distance < min_dist && distance > 0.0 {
-                // Collision detected
                 let normal = diff / distance;
                 let penetration = min_dist - distance;
 
-                // Separation (push apart equally)
                 let separation = normal * (penetration / 2.0);
                 marbles[i].1 -= separation;
                 marbles[j].1 += separation;
 
-                // Relative velocity along collision normal
                 let rel_vel = vel_i - vel_j;
                 let vel_along_normal = rel_vel.dot(normal);
 
-                // Only resolve if marbles are moving toward each other
                 if vel_along_normal > 0.0 {
-                    // Impulse for equal mass elastic collision
                     let impulse = normal * (vel_along_normal * MARBLE_RESTITUTION);
                     marbles[i].2 -= impulse;
                     marbles[j].2 += impulse;
@@ -285,7 +186,6 @@ fn marble_collision(mut query: Query<(Entity, &mut Transform, &mut Marble)>) {
         }
     }
 
-    // Write back updated positions and velocities
     for (entity, new_pos, new_vel, _) in marbles {
         if let Ok((_, mut transform, mut marble)) = query.get_mut(entity) {
             transform.translation = new_pos;
@@ -294,48 +194,14 @@ fn marble_collision(mut query: Query<(Entity, &mut Transform, &mut Marble)>) {
     }
 }
 
-/// Visualize the track spine using Gizmos
-fn draw_track_gizmos(mut gizmos: Gizmos, track: Res<TrackSpine>) {
-    let points = &track.points;
-
-    // Draw the spine as a polyline
-    for i in 0..points.len() - 1 {
-        gizmos.line(points[i], points[i + 1], Color::srgb(0.2, 0.8, 0.2));
-    }
-
-    // Draw circles at each point to show the track radius
-    for (i, &point) in points.iter().enumerate() {
-        if i % 5 == 0 {
-            // Draw direction indicator
-            if i + 1 < points.len() {
-                let dir = (points[i + 1] - point).normalize_or_zero();
-                let right = dir.cross(Vec3::Y).normalize_or_zero();
-                let up = right.cross(dir).normalize_or_zero();
-
-                // Draw a circle approximation for the track cross-section
-                let segments = 16;
-                for j in 0..segments {
-                    let angle1 = (j as f32 / segments as f32) * std::f32::consts::TAU;
-                    let angle2 = ((j + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-
-                    let p1 = point + (right * angle1.cos() + up * angle1.sin()) * track.radius;
-                    let p2 = point + (right * angle2.cos() + up * angle2.sin()) * track.radius;
-
-                    gizmos.line(p1, p2, Color::srgb(0.5, 0.5, 1.0));
-                }
-            }
-
-            // Draw point markers
-            gizmos.sphere(
-                Isometry3d::from_translation(point),
-                0.1,
-                Color::srgb(1.0, 1.0, 0.0),
-            );
-        }
+/// Draw track using segment gizmos
+fn draw_track_gizmos(mut gizmos: Gizmos, track: Res<Track>) {
+    for segment in track.segments() {
+        segment.draw_debug_gizmos(&mut gizmos, Color::srgb(0.2, 0.8, 0.2));
     }
 }
 
-/// Camera follow system - follows the center of all marbles
+/// Camera follows center of all marbles
 fn camera_follow(
     marble_query: Query<&Transform, With<Marble>>,
     mut camera_query: Query<&mut Transform, (With<Camera3d>, Without<Marble>)>,
@@ -345,7 +211,6 @@ fn camera_follow(
         return;
     };
 
-    // Calculate center of all marbles
     let mut center = Vec3::ZERO;
     let mut count = 0;
     for marble_transform in marble_query.iter() {
@@ -364,26 +229,33 @@ fn camera_follow(
 }
 
 /// Reset marble if it falls too far
-fn reset_marble(mut query: Query<(&mut Transform, &mut Marble)>, track: Res<TrackSpine>) {
-    for (mut transform, mut marble) in query.iter_mut() {
-        if transform.translation.y < -20.0 {
-            transform.translation = track.points[0];
-            marble.velocity = Vec3::ZERO;
+fn reset_marble(mut query: Query<(&mut Transform, &mut Marble)>, track: Res<Track>) {
+    if let Some(start_port) = track.first_port() {
+        for (mut transform, mut marble) in query.iter_mut() {
+            if transform.translation.y < -20.0 {
+                transform.translation = start_port.position;
+                marble.velocity = Vec3::ZERO;
+            }
         }
     }
 }
 
-/// Press R to restart all marbles from the beginning
+/// Press R to restart all marbles
 fn restart_on_keypress(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut query: Query<(&mut Transform, &mut Marble)>,
-    track: Res<TrackSpine>,
+    track: Res<Track>,
 ) {
     if keyboard.just_pressed(KeyCode::KeyR) {
-        for (i, (mut transform, mut marble)) in query.iter_mut().enumerate() {
-            // Stagger marbles along track start (same as spawn)
-            transform.translation = track.points[i * 2];
-            marble.velocity = Vec3::ZERO;
+        if let Some(start_port) = track.first_port() {
+            // Get direction for staggering
+            let dir = start_port.direction;
+
+            for (i, (mut transform, mut marble)) in query.iter_mut().enumerate() {
+                // Stagger along track direction
+                transform.translation = start_port.position + dir * (i as f32 * 0.5);
+                marble.velocity = Vec3::ZERO;
+            }
         }
     }
 }
