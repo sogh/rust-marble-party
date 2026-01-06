@@ -9,7 +9,8 @@ const GRAVITY: Vec3 = Vec3::new(0.0, -20.0, 0.0); // Stronger gravity for snappi
 const MARBLE_RADIUS: f32 = 0.2; // Smaller ball bearing
 const TRACK_RADIUS: f32 = 1.0; // Tighter tube
 const SMOOTH_K: f32 = 0.5;
-const RESTITUTION: f32 = 0.6; // Steel bounces well
+const RESTITUTION: f32 = 0.6; // Steel bounces well against track
+const MARBLE_RESTITUTION: f32 = 0.9; // Steel-on-steel bounces very well
 const FRICTION: f32 = 0.995; // Steel on metal is slippery
 const GRADIENT_EPSILON: f32 = 0.01;
 
@@ -239,6 +240,60 @@ fn marble_physics(
     }
 }
 
+/// Marble-to-marble collision detection and response
+fn marble_collision(mut query: Query<(Entity, &mut Transform, &mut Marble)>) {
+    // Collect all marble data
+    let mut marbles: Vec<(Entity, Vec3, Vec3, f32)> = query
+        .iter()
+        .map(|(e, t, m)| (e, t.translation, m.velocity, m.radius))
+        .collect();
+
+    let count = marbles.len();
+
+    // Check all pairs
+    for i in 0..count {
+        for j in (i + 1)..count {
+            let (_, pos_i, vel_i, radius_i) = marbles[i];
+            let (_, pos_j, vel_j, radius_j) = marbles[j];
+
+            let diff = pos_j - pos_i;
+            let distance = diff.length();
+            let min_dist = radius_i + radius_j;
+
+            if distance < min_dist && distance > 0.0 {
+                // Collision detected
+                let normal = diff / distance;
+                let penetration = min_dist - distance;
+
+                // Separation (push apart equally)
+                let separation = normal * (penetration / 2.0);
+                marbles[i].1 -= separation;
+                marbles[j].1 += separation;
+
+                // Relative velocity along collision normal
+                let rel_vel = vel_i - vel_j;
+                let vel_along_normal = rel_vel.dot(normal);
+
+                // Only resolve if marbles are moving toward each other
+                if vel_along_normal > 0.0 {
+                    // Impulse for equal mass elastic collision
+                    let impulse = normal * (vel_along_normal * MARBLE_RESTITUTION);
+                    marbles[i].2 -= impulse;
+                    marbles[j].2 += impulse;
+                }
+            }
+        }
+    }
+
+    // Write back updated positions and velocities
+    for (entity, new_pos, new_vel, _) in marbles {
+        if let Ok((_, mut transform, mut marble)) = query.get_mut(entity) {
+            transform.translation = new_pos;
+            marble.velocity = new_vel;
+        }
+    }
+}
+
 /// Visualize the track spine using Gizmos
 fn draw_track_gizmos(mut gizmos: Gizmos, track: Res<TrackSpine>) {
     let points = &track.points;
@@ -345,6 +400,7 @@ fn main() {
             Update,
             (
                 marble_physics,
+                marble_collision,
                 draw_track_gizmos,
                 camera_follow,
                 reset_marble,
