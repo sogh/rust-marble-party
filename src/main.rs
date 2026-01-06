@@ -4,12 +4,13 @@ use bevy::prelude::*;
 // CONSTANTS
 // ============================================================================
 
-const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
-const MARBLE_RADIUS: f32 = 0.3;
-const TRACK_RADIUS: f32 = 1.5; // Larger radius so marble fits inside
+// Steel ball bearing physics
+const GRAVITY: Vec3 = Vec3::new(0.0, -20.0, 0.0); // Stronger gravity for snappier feel
+const MARBLE_RADIUS: f32 = 0.2; // Smaller ball bearing
+const TRACK_RADIUS: f32 = 1.0; // Tighter tube
 const SMOOTH_K: f32 = 0.5;
-const RESTITUTION: f32 = 0.3;
-const FRICTION: f32 = 0.98;
+const RESTITUTION: f32 = 0.6; // Steel bounces well
+const FRICTION: f32 = 0.995; // Steel on metal is slippery
 const GRADIENT_EPSILON: f32 = 0.01;
 
 // ============================================================================
