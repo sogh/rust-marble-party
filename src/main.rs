@@ -131,22 +131,38 @@ fn setup(
     // Initialize track resource
     commands.insert_resource(TrackSpine::default());
 
-    // Spawn marble at the start of the track spine (inside the tube)
-    let start_pos = create_track_spine()[0];
-    commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(MARBLE_RADIUS))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.8, 0.2, 0.2),
-            metallic: 0.7,
-            perceptual_roughness: 0.3,
-            ..default()
-        })),
-        Transform::from_translation(start_pos),
-        Marble {
-            velocity: Vec3::ZERO,
-            radius: MARBLE_RADIUS,
-        },
-    ));
+    // Spawn 8 marbles with different colors, staggered along the track start
+    let spine = create_track_spine();
+    let marble_colors = [
+        Color::srgb(0.9, 0.1, 0.1), // Red
+        Color::srgb(0.1, 0.7, 0.1), // Green
+        Color::srgb(0.1, 0.3, 0.9), // Blue
+        Color::srgb(0.9, 0.9, 0.1), // Yellow
+        Color::srgb(0.9, 0.1, 0.9), // Magenta
+        Color::srgb(0.1, 0.9, 0.9), // Cyan
+        Color::srgb(1.0, 0.5, 0.0), // Orange
+        Color::srgb(0.8, 0.8, 0.8), // Silver
+    ];
+
+    let mesh = meshes.add(Sphere::new(MARBLE_RADIUS));
+    for (i, color) in marble_colors.iter().enumerate() {
+        // Stagger marbles along first few spine points
+        let start_pos = spine[i * 2];
+        commands.spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: *color,
+                metallic: 0.9,
+                perceptual_roughness: 0.1,
+                ..default()
+            })),
+            Transform::from_translation(start_pos),
+            Marble {
+                velocity: Vec3::ZERO,
+                radius: MARBLE_RADIUS,
+            },
+        ));
+    }
 
     // Spawn camera
     commands.spawn((
@@ -264,20 +280,31 @@ fn draw_track_gizmos(mut gizmos: Gizmos, track: Res<TrackSpine>) {
     }
 }
 
-/// Camera follow system
+/// Camera follow system - follows the center of all marbles
 fn camera_follow(
     marble_query: Query<&Transform, With<Marble>>,
     mut camera_query: Query<&mut Transform, (With<Camera3d>, Without<Marble>)>,
     time: Res<Time>,
 ) {
-    if let (Ok(marble_transform), Ok(mut camera_transform)) =
-        (marble_query.get_single(), camera_query.get_single_mut())
-    {
-        let target_pos = marble_transform.translation + Vec3::new(10.0, 8.0, 10.0);
+    let Ok(mut camera_transform) = camera_query.get_single_mut() else {
+        return;
+    };
+
+    // Calculate center of all marbles
+    let mut center = Vec3::ZERO;
+    let mut count = 0;
+    for marble_transform in marble_query.iter() {
+        center += marble_transform.translation;
+        count += 1;
+    }
+
+    if count > 0 {
+        center /= count as f32;
+        let target_pos = center + Vec3::new(12.0, 10.0, 12.0);
         let lerp_speed = 2.0 * time.delta_secs();
 
         camera_transform.translation = camera_transform.translation.lerp(target_pos, lerp_speed);
-        camera_transform.look_at(marble_transform.translation, Vec3::Y);
+        camera_transform.look_at(center, Vec3::Y);
     }
 }
 
@@ -286,6 +313,21 @@ fn reset_marble(mut query: Query<(&mut Transform, &mut Marble)>, track: Res<Trac
     for (mut transform, mut marble) in query.iter_mut() {
         if transform.translation.y < -20.0 {
             transform.translation = track.points[0];
+            marble.velocity = Vec3::ZERO;
+        }
+    }
+}
+
+/// Press R to restart all marbles from the beginning
+fn restart_on_keypress(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut query: Query<(&mut Transform, &mut Marble)>,
+    track: Res<TrackSpine>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyR) {
+        for (i, (mut transform, mut marble)) in query.iter_mut().enumerate() {
+            // Stagger marbles along track start (same as spawn)
+            transform.translation = track.points[i * 2];
             marble.velocity = Vec3::ZERO;
         }
     }
@@ -306,6 +348,7 @@ fn main() {
                 draw_track_gizmos,
                 camera_follow,
                 reset_marble,
+                restart_on_keypress,
             ),
         )
         .run();
