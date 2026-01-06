@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 const MARBLE_RADIUS: f32 = 0.3;
-const TRACK_RADIUS: f32 = 0.8;
+const TRACK_RADIUS: f32 = 1.5; // Larger radius so marble fits inside
 const SMOOTH_K: f32 = 0.5;
 const RESTITUTION: f32 = 0.3;
 const FRICTION: f32 = 0.98;
@@ -56,7 +56,8 @@ fn smooth_min(a: f32, b: f32, k: f32) -> f32 {
     b.lerp(a, h) - k * h * (1.0 - h)
 }
 
-/// Calculate the distance from a point to the track spine using capsule SDFs with smooth-min blend
+/// Calculate the distance from a point to the INSIDE of the track tube
+/// Returns negative when inside the tube (no collision), positive when penetrating the wall
 fn track_sdf(p: Vec3, spine: &[Vec3], radius: f32) -> f32 {
     if spine.len() < 2 {
         return f32::MAX;
@@ -69,7 +70,9 @@ fn track_sdf(p: Vec3, spine: &[Vec3], radius: f32) -> f32 {
         dist = smooth_min(dist, segment_dist, SMOOTH_K);
     }
 
-    dist
+    // Negate to make collision happen on the INSIDE of the tube
+    // Now: negative = inside tube (free space), positive = outside/in wall
+    -dist
 }
 
 /// Calculate the gradient (normal) of the SDF at point `p` using central differences
@@ -90,20 +93,24 @@ fn track_sdf_gradient(p: Vec3, spine: &[Vec3], radius: f32) -> Vec3 {
 // TRACK GENERATION
 // ============================================================================
 
-/// Create a fun roller-coaster-like track spine
+/// Create a fun roller-coaster-like track spine with consistent downward slope
 fn create_track_spine() -> Vec<Vec3> {
     let mut points = Vec::new();
-    let segments = 100;
+    let segments = 150;
 
     for i in 0..=segments {
         let t = i as f32 / segments as f32;
-        let angle = t * std::f32::consts::TAU * 2.0;
+        let angle = t * std::f32::consts::TAU * 3.0; // 3 full loops
 
-        // Spiral with varying height
-        let radius = 5.0 + 2.0 * (angle * 0.5).sin();
+        // Spiral with varying radius
+        let radius = 5.0 + 1.5 * (angle * 0.5).sin();
         let x = radius * angle.cos();
         let z = radius * angle.sin();
-        let y = 3.0 * (angle * 0.3).sin() + 1.5 * (angle * 0.7).cos() + 2.0;
+
+        // Descending helix with some bumps for fun
+        let descent = 30.0 * (1.0 - t); // Steeper slope
+        let bumps = 0.5 * (angle * 2.0).cos(); // Small ripples, won't stop the marble
+        let y = descent + bumps + 2.0;
 
         points.push(Vec3::new(x, y, z));
     }
@@ -123,7 +130,8 @@ fn setup(
     // Initialize track resource
     commands.insert_resource(TrackSpine::default());
 
-    // Spawn marble
+    // Spawn marble at the start of the track spine (inside the tube)
+    let start_pos = create_track_spine()[0];
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(MARBLE_RADIUS))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -132,7 +140,7 @@ fn setup(
             perceptual_roughness: 0.3,
             ..default()
         })),
-        Transform::from_translation(Vec3::new(5.0, 8.0, 0.0)),
+        Transform::from_translation(start_pos),
         Marble {
             velocity: Vec3::ZERO,
             radius: MARBLE_RADIUS,
@@ -273,10 +281,10 @@ fn camera_follow(
 }
 
 /// Reset marble if it falls too far
-fn reset_marble(mut query: Query<(&mut Transform, &mut Marble)>) {
+fn reset_marble(mut query: Query<(&mut Transform, &mut Marble)>, track: Res<TrackSpine>) {
     for (mut transform, mut marble) in query.iter_mut() {
         if transform.translation.y < -20.0 {
-            transform.translation = Vec3::new(5.0, 8.0, 0.0);
+            transform.translation = track.points[0];
             marble.velocity = Vec3::ZERO;
         }
     }
