@@ -1,19 +1,15 @@
 use bevy::prelude::*;
 use crate::track::{Port, AABB, Segment, capsule_sdf, smooth_min};
 
-/// A helical tube segment that spirals downward
-pub struct SpiralTube {
-    /// Number of complete loops
-    pub loops: f32,
-    /// Total vertical descent
-    pub descent: f32,
-    /// Radius of the helix (distance from center)
-    pub helix_radius: f32,
+/// A tube that curves in a horizontal arc
+pub struct CurvedTube {
+    /// Arc angle in radians (positive = left, negative = right)
+    pub arc_angle: f32,
+    /// Radius of the arc (distance from center of curve to tube center)
+    pub arc_radius: f32,
     /// Radius of the tube itself
     pub tube_radius: f32,
-    /// Amplitude of small bumps along the path
-    pub bump_amplitude: f32,
-    /// Number of points to generate for the spine
+    /// Number of segments for SDF approximation
     pub segments: usize,
     /// Cached spine points
     spine: Vec<Vec3>,
@@ -25,26 +21,17 @@ pub struct SpiralTube {
     bounds: AABB,
 }
 
-impl SpiralTube {
-    pub fn new(
-        loops: f32,
-        descent: f32,
-        helix_radius: f32,
-        tube_radius: f32,
-        entry_port: Port,
-    ) -> Self {
-        let segments = (loops * 50.0) as usize + 1;
-        let bump_amplitude = 0.5;
+impl CurvedTube {
+    pub fn new(arc_angle: f32, arc_radius: f32, tube_radius: f32, entry_port: Port) -> Self {
+        let segments = ((arc_angle.abs() / std::f32::consts::TAU) * 32.0).max(8.0) as usize;
 
         let mut tube = Self {
-            loops,
-            descent,
-            helix_radius,
+            arc_angle,
+            arc_radius,
             tube_radius,
-            bump_amplitude,
             segments,
             spine: Vec::new(),
-            entry: entry_port.clone(),
+            entry: entry_port,
             exit: Port::default(),
             bounds: AABB::default(),
         };
@@ -53,36 +40,54 @@ impl SpiralTube {
         tube
     }
 
-    /// Create with default starting position at origin
-    pub fn at_origin(loops: f32, descent: f32, helix_radius: f32, tube_radius: f32) -> Self {
-        let start_pos = Vec3::new(helix_radius, descent + 2.0, 0.0);
-        let entry = Port::new(
-            start_pos,
-            Vec3::new(0.0, -0.3, 1.0).normalize(), // Slightly downward, forward
-            Vec3::Y,
-            tube_radius,
-        );
-        Self::new(loops, descent, helix_radius, tube_radius, entry)
+    /// Create a left-curving tube at origin
+    pub fn left(arc_angle: f32, arc_radius: f32, tube_radius: f32, entry_port: Port) -> Self {
+        Self::new(arc_angle.abs(), arc_radius, tube_radius, entry_port)
+    }
+
+    /// Create a right-curving tube at origin
+    pub fn right(arc_angle: f32, arc_radius: f32, tube_radius: f32, entry_port: Port) -> Self {
+        Self::new(-arc_angle.abs(), arc_radius, tube_radius, entry_port)
     }
 
     fn generate_spine(&mut self) {
         self.spine.clear();
 
-        let start_y = self.entry.position.y;
+        // Get the entry direction projected onto horizontal plane for curve calculation
+        let entry_dir_horizontal = Vec3::new(self.entry.direction.x, 0.0, self.entry.direction.z).normalize_or_zero();
 
+        // If entry is nearly vertical, use a default horizontal direction
+        let entry_dir_horizontal = if entry_dir_horizontal.length() < 0.1 {
+            Vec3::NEG_Z
+        } else {
+            entry_dir_horizontal
+        };
+
+        // Calculate perpendicular direction (to the right of travel)
+        // Y cross direction gives right, direction cross Y gives left
+        let right = Vec3::Y.cross(entry_dir_horizontal).normalize();
+
+        // Calculate the center of the arc
+        let curve_center = if self.arc_angle > 0.0 {
+            // Curving left: center is to the left
+            self.entry.position - right * self.arc_radius
+        } else {
+            // Curving right: center is to the right
+            self.entry.position + right * self.arc_radius
+        };
+
+        // Calculate the starting angle from center to entry point
+        let to_entry = self.entry.position - curve_center;
+        let start_angle = to_entry.z.atan2(to_entry.x);
+
+        // Generate spine points along the arc
         for i in 0..=self.segments {
             let t = i as f32 / self.segments as f32;
-            let angle = t * std::f32::consts::TAU * self.loops;
+            let angle = start_angle + self.arc_angle * t;
 
-            // Spiral with varying radius
-            let radius = self.helix_radius + 1.5 * (angle * 0.5).sin();
-            let x = radius * angle.cos();
-            let z = radius * angle.sin();
-
-            // Descending with small bumps (cosine so starts going downhill)
-            let base_descent = self.descent * t;
-            let bumps = self.bump_amplitude * (angle * 2.0).cos();
-            let y = start_y - base_descent + bumps;
+            let x = curve_center.x + self.arc_radius * angle.cos();
+            let z = curve_center.z + self.arc_radius * angle.sin();
+            let y = self.entry.position.y; // Keep same height for horizontal curve
 
             self.spine.push(Vec3::new(x, y, z));
         }
@@ -94,21 +99,12 @@ impl SpiralTube {
         if self.spine.len() >= 2 {
             let last = self.spine[self.spine.len() - 1];
             let prev = self.spine[self.spine.len() - 2];
-            let dir = (last - prev).normalize();
+            let exit_dir = (last - prev).normalize();
 
-            self.exit = Port::new(last, dir, Vec3::Y, self.tube_radius);
-        }
-
-        // Update entry port to match actual spine start
-        if !self.spine.is_empty() {
-            self.entry.position = self.spine[0];
-            if self.spine.len() >= 2 {
-                self.entry.direction = (self.spine[1] - self.spine[0]).normalize();
-            }
+            self.exit = Port::new(last, exit_dir, self.entry.up, self.tube_radius);
         }
     }
 
-    /// Get the spine points for external use
     pub fn spine(&self) -> &[Vec3] {
         &self.spine
     }
@@ -117,7 +113,7 @@ impl SpiralTube {
 /// How far to extend the SDF past segment endpoints for smooth blending
 const OVERLAP_DISTANCE: f32 = 1.0; // Matches tube_radius
 
-impl Segment for SpiralTube {
+impl Segment for CurvedTube {
     fn sdf(&self, point: Vec3) -> f32 {
         if self.spine.len() < 2 {
             return f32::MAX;
@@ -130,7 +126,7 @@ impl Segment for SpiralTube {
         // Middle capsules (no extension needed)
         for i in 1..self.spine.len() - 2 {
             let seg_dist = capsule_sdf(point, self.spine[i], self.spine[i + 1], self.tube_radius);
-            dist = smooth_min(dist, seg_dist, 0.5);
+            dist = smooth_min(dist, seg_dist, 0.3);
         }
 
         // Extend the last capsule forwards past exit for smooth junction blending
@@ -138,10 +134,10 @@ impl Segment for SpiralTube {
             let last_idx = self.spine.len() - 1;
             let extended_exit = self.spine[last_idx] + self.exit.direction * OVERLAP_DISTANCE;
             let seg_dist = capsule_sdf(point, self.spine[last_idx - 1], extended_exit, self.tube_radius);
-            dist = smooth_min(dist, seg_dist, 0.5);
+            dist = smooth_min(dist, seg_dist, 0.3);
         }
 
-        // Negate so collision is on INSIDE of tube
+        // Negate for inside collision
         -dist
     }
 
@@ -202,30 +198,14 @@ impl Segment for SpiralTube {
             gizmos.line(self.spine[i], self.spine[i + 1], color);
         }
 
-        // Draw extended capsule endpoints (overlap regions)
-        if !self.spine.is_empty() {
-            let extended_entry = self.spine[0] - self.entry.direction * OVERLAP_DISTANCE;
-            let last_idx = self.spine.len() - 1;
-            let extended_exit = self.spine[last_idx] + self.exit.direction * OVERLAP_DISTANCE;
-
-            // Draw extended lines in yellow
-            gizmos.line(extended_entry, self.spine[0], Color::srgb(1.0, 1.0, 0.0));
-            gizmos.line(self.spine[last_idx], extended_exit, Color::srgb(1.0, 1.0, 0.0));
-
-            // Draw spheres at extended endpoints
-            gizmos.sphere(Isometry3d::from_translation(extended_entry), self.tube_radius, Color::srgb(1.0, 1.0, 0.0));
-            gizmos.sphere(Isometry3d::from_translation(extended_exit), self.tube_radius, Color::srgb(1.0, 0.5, 0.0));
-        }
-
-        // Draw cross-section circles every few points
+        // Draw cross-sections at intervals
         for (i, &point) in self.spine.iter().enumerate() {
-            if i % 5 == 0 && i + 1 < self.spine.len() {
+            if i % 4 == 0 && i + 1 < self.spine.len() {
                 let dir = (self.spine[i + 1] - point).normalize_or_zero();
                 let right = dir.cross(Vec3::Y).normalize_or_zero();
                 let up = right.cross(dir).normalize_or_zero();
 
-                // Draw circle
-                let segments = 16;
+                let segments = 12;
                 for j in 0..segments {
                     let angle1 = (j as f32 / segments as f32) * std::f32::consts::TAU;
                     let angle2 = ((j + 1) as f32 / segments as f32) * std::f32::consts::TAU;
@@ -238,21 +218,15 @@ impl Segment for SpiralTube {
             }
         }
 
-        // Draw entry/exit ports
-        let entry = self.entry_port();
-        gizmos.sphere(Isometry3d::from_translation(entry.position), 0.15, Color::srgb(0.0, 1.0, 0.0));
-        gizmos.ray(entry.position, entry.direction * 0.5, Color::srgb(0.0, 1.0, 0.0));
+        // Entry/exit markers
+        gizmos.sphere(Isometry3d::from_translation(self.entry.position), 0.15, Color::srgb(0.0, 1.0, 0.0));
+        gizmos.ray(self.entry.position, self.entry.direction * 0.5, Color::srgb(0.0, 1.0, 0.0));
 
-        let exit = self.primary_exit_port();
-        gizmos.sphere(Isometry3d::from_translation(exit.position), 0.15, Color::srgb(1.0, 0.0, 0.0));
-        gizmos.ray(exit.position, exit.direction * 0.5, Color::srgb(1.0, 0.0, 0.0));
+        gizmos.sphere(Isometry3d::from_translation(self.exit.position), 0.15, Color::srgb(1.0, 0.0, 0.0));
+        gizmos.ray(self.exit.position, self.exit.direction * 0.5, Color::srgb(1.0, 0.0, 0.0));
     }
 
     fn type_name(&self) -> &'static str {
-        "SpiralTube"
-    }
-
-    fn descent(&self) -> f32 {
-        self.descent
+        "CurvedTube"
     }
 }

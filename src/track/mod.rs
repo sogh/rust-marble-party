@@ -151,6 +151,10 @@ pub trait Segment: Send + Sync {
     /// Negative = inside (free space), Positive = outside/in wall
     fn sdf(&self, point: Vec3) -> f32;
 
+    /// Check if point is in the core region (not in end cap overlap zones)
+    /// Returns true if collisions should be applied at this point
+    fn is_in_core_region(&self, point: Vec3) -> bool;
+
     /// Get the entry port for this segment
     fn entry_port(&self) -> Port;
 
@@ -196,7 +200,7 @@ impl Track {
         Self {
             segments: Vec::new(),
             bounds: AABB::default(),
-            smooth_k: 0.5,
+            smooth_k: 1.0, // Smooth junction blending
         }
     }
 
@@ -263,13 +267,54 @@ impl Track {
         min_dist
     }
 
-    /// Compute gradient (normal) via central differences
+    /// Compute gradient (normal) from the nearest segment
+    /// Uses the nearest segment's SDF directly to avoid blending artifacts at junctions
     pub fn sdf_gradient(&self, point: Vec3) -> Vec3 {
         const EPS: f32 = 0.01;
 
-        let dx = self.sdf(point + Vec3::X * EPS) - self.sdf(point - Vec3::X * EPS);
-        let dy = self.sdf(point + Vec3::Y * EPS) - self.sdf(point - Vec3::Y * EPS);
-        let dz = self.sdf(point + Vec3::Z * EPS) - self.sdf(point - Vec3::Z * EPS);
+        // Find the nearest segment
+        let mut nearest_idx = 0;
+        let mut nearest_dist = f32::MAX;
+
+        for (i, segment) in self.segments.iter().enumerate() {
+            let bounds = segment.bounds();
+            if !bounds.expanded(2.0).contains(point) {
+                continue;
+            }
+
+            let dist = segment.sdf(point).abs();
+            if dist < nearest_dist {
+                nearest_dist = dist;
+                nearest_idx = i;
+            }
+        }
+
+        if self.segments.is_empty() {
+            return Vec3::Y;
+        }
+
+        // Compute gradient from the nearest segment only
+        let segment = &self.segments[nearest_idx];
+        let dx = segment.sdf(point + Vec3::X * EPS) - segment.sdf(point - Vec3::X * EPS);
+        let dy = segment.sdf(point + Vec3::Y * EPS) - segment.sdf(point - Vec3::Y * EPS);
+        let dz = segment.sdf(point + Vec3::Z * EPS) - segment.sdf(point - Vec3::Z * EPS);
+
+        Vec3::new(dx, dy, dz).normalize_or_zero()
+    }
+
+    /// Compute gradient from a specific segment
+    /// Used to maintain consistent collision normals through junctions
+    pub fn segment_gradient(&self, segment_idx: usize, point: Vec3) -> Vec3 {
+        const EPS: f32 = 0.01;
+
+        if segment_idx >= self.segments.len() {
+            return self.sdf_gradient(point);
+        }
+
+        let segment = &self.segments[segment_idx];
+        let dx = segment.sdf(point + Vec3::X * EPS) - segment.sdf(point - Vec3::X * EPS);
+        let dy = segment.sdf(point + Vec3::Y * EPS) - segment.sdf(point - Vec3::Y * EPS);
+        let dz = segment.sdf(point + Vec3::Z * EPS) - segment.sdf(point - Vec3::Z * EPS);
 
         Vec3::new(dx, dy, dz).normalize_or_zero()
     }
@@ -288,6 +333,44 @@ impl Track {
     pub fn clear(&mut self) {
         self.segments.clear();
         self.bounds = AABB::default();
+    }
+
+    /// Check if point is in any segment's core region (not in end caps)
+    pub fn is_in_any_core_region(&self, point: Vec3) -> bool {
+        for segment in &self.segments {
+            if segment.is_in_core_region(point) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Find which segment contains a point (returns segment index, or -1 if none)
+    /// A point is "in" a segment if its SDF value is positive (inside the surface)
+    pub fn find_segment(&self, point: Vec3) -> i32 {
+        let mut best_idx: i32 = -1;
+        let mut best_dist = f32::NEG_INFINITY;
+
+        for (i, segment) in self.segments.iter().enumerate() {
+            let bounds = segment.bounds();
+            if !bounds.expanded(1.0).contains(point) {
+                continue;
+            }
+
+            let dist = segment.sdf(point);
+            // Positive SDF means inside the surface
+            if dist > best_dist {
+                best_dist = dist;
+                best_idx = i as i32;
+            }
+        }
+
+        // Only return a segment if we're actually inside it
+        if best_dist > 0.0 {
+            best_idx
+        } else {
+            -1
+        }
     }
 }
 
