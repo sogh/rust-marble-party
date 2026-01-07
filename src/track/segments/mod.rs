@@ -5,6 +5,9 @@ mod flat_slope;
 mod narrowing_tube;
 mod widening_tube;
 mod funnel;
+mod half_pipe;
+mod bowl;
+mod fork;
 
 pub use spiral_tube::SpiralTube;
 pub use straight_tube::StraightTube;
@@ -13,3 +16,6 @@ pub use flat_slope::FlatSlope;
 pub use narrowing_tube::NarrowingTube;
 pub use widening_tube::WideningTube;
 pub use funnel::Funnel;
+pub use half_pipe::HalfPipe;
+pub use bowl::Bowl;
+pub use fork::Fork;

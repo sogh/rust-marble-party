@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 
 mod track;
-use track::{Track, Port, SpiralTube, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, Funnel, Segment};
+use track::{Track, Port, SpiralTube, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, Funnel, HalfPipe, Bowl, Fork, Segment};
 
 // ============================================================================
 // CONSTANTS
