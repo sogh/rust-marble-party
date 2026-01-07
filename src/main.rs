@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 
 mod track;
-use track::{Track, Port, SpiralTube, StraightTube, CurvedTube, FlatSlope, Segment};
+use track::{Track, Port, SpiralTube, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, Funnel, Segment};
 
 // ============================================================================
 // CONSTANTS
@@ -83,9 +83,23 @@ fn setup(
         exit_port.position, exit_port.direction);
     track.add_segment(Box::new(straight));
 
+    // Add narrowing tube transition (very gentle narrowing)
+    let narrowing = NarrowingTube::new(8.0, TRACK_RADIUS, TRACK_RADIUS * 0.9, exit_port.clone());
+    let exit_port = narrowing.exit_ports()[0].clone();
+    info!("Segment 2 (NarrowingTube): exit={:?} dir={:?}",
+        exit_port.position, exit_port.direction);
+    track.add_segment(Box::new(narrowing));
+
+    // Add widening tube back to normal
+    let widening = WideningTube::new(8.0, TRACK_RADIUS * 0.9, TRACK_RADIUS, exit_port.clone());
+    let exit_port = widening.exit_ports()[0].clone();
+    info!("Segment 3 (WideningTube): exit={:?} dir={:?}",
+        exit_port.position, exit_port.direction);
+    track.add_segment(Box::new(widening));
+
     // End with flat slope
     let slope = FlatSlope::new(10.0, 2.5, 1.0, 0.3, exit_port.clone());
-    info!("Segment 2 (FlatSlope): exit={:?} dir={:?}",
+    info!("Segment 4 (FlatSlope): exit={:?} dir={:?}",
         slope.exit_ports()[0].position, slope.exit_ports()[0].direction);
     track.add_segment(Box::new(slope));
 
