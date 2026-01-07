@@ -1,9 +1,11 @@
 use bevy::prelude::*;
 
 pub mod segments;
+pub mod generator;
 
 // Re-export segment types
 pub use segments::*;
+pub use generator::{TrackGenerator, GeneratorConfig, ProceduralTrack};
 
 // ============================================================================
 // PORT - Connection point between segments

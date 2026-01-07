@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 
 mod track;
-use track::{Track, Port, SpiralTube, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, Funnel, HalfPipe, Bowl, Fork, Segment};
+use track::{Track, SpiralTube, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, Segment, TrackGenerator, GeneratorConfig};
 
 // ============================================================================
 // CONSTANTS
@@ -54,6 +54,35 @@ struct RedMarbleDebug {
     collision_normal: Vec3,
     sdf_distance: f32,
     penetration: f32,
+}
+
+/// Debug track builder state
+#[derive(Resource)]
+struct TrackBuilder {
+    /// Currently selected segment type to add
+    selected_type: usize,
+    /// Available segment type names
+    segment_types: Vec<&'static str>,
+    /// Is build mode active
+    build_mode: bool,
+}
+
+impl Default for TrackBuilder {
+    fn default() -> Self {
+        Self {
+            selected_type: 0,
+            segment_types: vec![
+                "StraightTube",
+                "CurvedLeft",
+                "CurvedRight",
+                "NarrowingTube",
+                "WideningTube",
+                "FlatSlope",
+                "HalfPipe",
+            ],
+            build_mode: false,
+        }
+    }
 }
 
 // ============================================================================
@@ -397,6 +426,131 @@ fn restart_on_keypress(
     }
 }
 
+/// G - Generate new procedural track
+fn procedural_generation_controls(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut track: ResMut<Track>,
+    mut marble_query: Query<(&mut Transform, &mut Marble)>,
+    mut seed_counter: Local<u64>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyG) {
+        // Increment seed for variety
+        *seed_counter += 1;
+
+        let config = GeneratorConfig {
+            seed: *seed_counter,
+            ..default()
+        };
+        let mut generator = TrackGenerator::new(config);
+
+        // Generate new track
+        *track = generator.generate(12);
+        info!("Generated procedural track with seed {} ({} segments)",
+            *seed_counter, track.segment_count());
+
+        // Reset marbles to start
+        if let Some(start_port) = track.first_port() {
+            let dir = start_port.direction;
+            for (i, (mut transform, mut marble)) in marble_query.iter_mut().enumerate() {
+                transform.translation = start_port.position + dir * (i as f32 * 0.5);
+                marble.velocity = Vec3::ZERO;
+                marble.current_segment = 0;
+            }
+        }
+    }
+}
+
+/// Track builder controls:
+/// B - Toggle build mode
+/// 1-7 - Select segment type
+/// Enter - Add selected segment
+/// Backspace - Remove last segment
+fn track_builder_controls(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut track: ResMut<Track>,
+    mut builder: ResMut<TrackBuilder>,
+) {
+    // Toggle build mode
+    if keyboard.just_pressed(KeyCode::KeyB) {
+        builder.build_mode = !builder.build_mode;
+        info!("Build mode: {}", if builder.build_mode { "ON" } else { "OFF" });
+    }
+
+    if !builder.build_mode {
+        return;
+    }
+
+    // Select segment type with number keys
+    let type_keys = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+    ];
+
+    for (i, key) in type_keys.iter().enumerate() {
+        if keyboard.just_pressed(*key) && i < builder.segment_types.len() {
+            builder.selected_type = i;
+            info!("Selected: {}", builder.segment_types[i]);
+        }
+    }
+
+    // Add segment with Enter
+    if keyboard.just_pressed(KeyCode::Enter) {
+        if let Some(exit_port) = track.last_port() {
+            let segment_type = builder.segment_types[builder.selected_type];
+
+            let new_segment: Box<dyn Segment> = match segment_type {
+                "StraightTube" => Box::new(StraightTube::new(8.0, TRACK_RADIUS, exit_port)),
+                "CurvedLeft" => Box::new(CurvedTube::new(
+                    std::f32::consts::FRAC_PI_2,
+                    5.0,
+                    TRACK_RADIUS,
+                    exit_port,
+                )),
+                "CurvedRight" => Box::new(CurvedTube::new(
+                    -std::f32::consts::FRAC_PI_2,
+                    5.0,
+                    TRACK_RADIUS,
+                    exit_port,
+                )),
+                "NarrowingTube" => Box::new(NarrowingTube::new(
+                    6.0,
+                    TRACK_RADIUS,
+                    TRACK_RADIUS * 0.8,
+                    exit_port,
+                )),
+                "WideningTube" => Box::new(WideningTube::new(
+                    6.0,
+                    TRACK_RADIUS * 0.8,
+                    TRACK_RADIUS,
+                    exit_port,
+                )),
+                "FlatSlope" => Box::new(FlatSlope::new(10.0, 2.5, 1.0, 0.3, exit_port)),
+                "HalfPipe" => Box::new(HalfPipe::new(10.0, TRACK_RADIUS * 1.5, exit_port)),
+                _ => return,
+            };
+
+            info!("Added {} (total segments: {})", segment_type, track.segment_count() + 1);
+            track.add_segment(new_segment);
+        } else {
+            info!("No track to extend from!");
+        }
+    }
+
+    // Remove last segment with Backspace
+    if keyboard.just_pressed(KeyCode::Backspace) {
+        if let Some(removed) = track.remove_last() {
+            info!("Removed {} (remaining: {})", removed.type_name(), track.segment_count());
+        } else {
+            info!("No segments to remove!");
+        }
+    }
+}
+
 /// Setup debug UI overlay
 fn setup_debug_ui(mut commands: Commands) {
     commands.spawn((
@@ -421,6 +575,7 @@ fn update_debug_ui(
     time_scale: Res<PhysicsTimeScale>,
     diagnostics: Res<DiagnosticsStore>,
     track: Res<Track>,
+    builder: Res<TrackBuilder>,
     red_marble_debug: Res<RedMarbleDebug>,
     marble_query: Query<(&Transform, &Marble, &MarbleId)>,
     mut text_query: Query<&mut Text, With<DebugText>>,
@@ -434,6 +589,23 @@ fn update_debug_ui(
         .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())
         .unwrap_or(0.0);
+
+    // Build mode info
+    let build_info = if builder.build_mode {
+        format!(
+            "\n\n[BUILD MODE]\n\
+             Selected: {} {}\n\
+             Segments: {}\n\
+             1-7: Select type\n\
+             Enter: Add segment\n\
+             Backspace: Remove last",
+            builder.selected_type + 1,
+            builder.segment_types[builder.selected_type],
+            track.segment_count()
+        )
+    } else {
+        String::new()
+    };
 
     // Find red marble (marble 0)
     let mut red_marble_info = String::new();
@@ -486,10 +658,13 @@ fn update_debug_ui(
         "[Debug Info]\n\
          FPS: {:.0}\n\
          Physics Speed: {:.2}x\n\
-         Controls: [/] speed, R restart{}",
+         Segments: {}\n\
+         Controls: [/] speed, R restart, B build, G generate{}{}",
         fps,
         time_scale.0,
-        red_marble_info
+        track.segment_count(),
+        red_marble_info,
+        build_info
     );
 }
 
@@ -503,11 +678,14 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .init_resource::<PhysicsTimeScale>()
         .init_resource::<RedMarbleDebug>()
+        .init_resource::<TrackBuilder>()
         .add_systems(Startup, (setup, setup_debug_ui))
         .add_systems(
             Update,
             (
                 time_scale_controls,
+                track_builder_controls,
+                procedural_generation_controls,
                 marble_physics,
                 marble_collision,
                 draw_track_gizmos,
