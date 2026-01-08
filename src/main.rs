@@ -44,6 +44,10 @@ struct Marble {
     previous_segment: i32,
     /// Distance traveled since last segment transition
     transition_distance: f32,
+    /// Position at start of physics step (for render interpolation)
+    previous_position: Vec3,
+    /// Position at end of physics step (for render interpolation)
+    physics_position: Vec3,
 }
 
 #[derive(Component)]
@@ -170,6 +174,8 @@ fn setup(
                 current_segment: 0,
                 previous_segment: 0,
                 transition_distance: f32::MAX, // Start fully transitioned
+                previous_position: start_pos,
+                physics_position: start_pos,
             },
             MarbleId(i),
         ));
@@ -210,11 +216,15 @@ fn marble_physics(
     let dt = time.delta_secs();
 
     for (mut transform, mut marble, marble_id) in query.iter_mut() {
+        // Store previous position for render interpolation
+        marble.previous_position = marble.physics_position;
+
         // Apply gravity
         marble.velocity += GRAVITY * dt;
 
-        // Predict next position
-        let next_pos = transform.translation + marble.velocity * dt;
+        // Predict next position - use physics_position as source of truth, not transform
+        // (transform.translation gets modified by interpolation for rendering)
+        let next_pos = marble.physics_position + marble.velocity * dt;
 
         // Check SDF penetration using fast local check
         let dist = track.sdf_near_segment(next_pos, marble.current_segment);
@@ -262,9 +272,9 @@ fn marble_physics(
 
             // Apply friction and restitution
             marble.velocity = vel_tangent * FRICTION - vel_normal * RESTITUTION;
-            transform.translation = corrected_pos;
+            marble.physics_position = corrected_pos;
         } else {
-            transform.translation = next_pos;
+            marble.physics_position = next_pos;
 
             // Track no collision for red marble
             if marble_id.0 == 0 {
@@ -279,7 +289,7 @@ fn marble_physics(
 
         // Track which segment the marble is in - only allow forward transitions
         // This prevents oscillation at junctions (uses fast local search)
-        let detected_segment = track.find_segment_near(transform.translation, marble.current_segment);
+        let detected_segment = track.find_segment_near(marble.physics_position, marble.current_segment);
 
         // Only transition if:
         // 1. Moving forward (to next segment), OR
@@ -327,9 +337,10 @@ fn marble_physics(
 
 /// Marble-to-marble collision
 fn marble_collision(mut query: Query<(Entity, &mut Transform, &mut Marble)>) {
+    // Use physics_position as source of truth, not transform.translation
     let mut marbles: Vec<(Entity, Vec3, Vec3, f32)> = query
         .iter()
-        .map(|(e, t, m)| (e, t.translation, m.velocity, m.radius))
+        .map(|(e, _t, m)| (e, m.physics_position, m.velocity, m.radius))
         .collect();
 
     let count = marbles.len();
@@ -364,10 +375,25 @@ fn marble_collision(mut query: Query<(Entity, &mut Transform, &mut Marble)>) {
     }
 
     for (entity, new_pos, new_vel, _) in marbles {
-        if let Ok((_, mut transform, mut marble)) = query.get_mut(entity) {
-            transform.translation = new_pos;
+        if let Ok((_, _transform, mut marble)) = query.get_mut(entity) {
+            // Only update physics state - interpolation handles transform
+            marble.physics_position = new_pos;
             marble.velocity = new_vel;
         }
+    }
+}
+
+/// Interpolate marble positions for smooth rendering between fixed timesteps
+fn marble_interpolation(
+    fixed_time: Res<Time<Fixed>>,
+    mut query: Query<(&mut Transform, &Marble)>,
+) {
+    // How far we are between the last physics step and the next one (0.0 to 1.0)
+    let alpha = fixed_time.overstep_fraction();
+
+    for (mut transform, marble) in query.iter_mut() {
+        // Lerp between previous physics position and current physics position
+        transform.translation = marble.previous_position.lerp(marble.physics_position, alpha);
     }
 }
 
@@ -418,9 +444,12 @@ fn reset_marble(mut query: Query<(&mut Transform, &mut Marble)>, track: Res<Trac
     if let Some(start_port) = track.first_port() {
         for (mut transform, mut marble) in query.iter_mut() {
             if transform.translation.y < -20.0 {
-                transform.translation = start_port.position;
+                let pos = start_port.position;
+                transform.translation = pos;
                 marble.velocity = Vec3::ZERO;
                 marble.current_segment = 0;
+                marble.previous_position = pos;
+                marble.physics_position = pos;
             }
         }
     }
@@ -463,11 +492,14 @@ fn restart_on_keypress(
 
             for (i, (mut transform, mut marble)) in query.iter_mut().enumerate() {
                 // Stagger along track direction
-                transform.translation = start_port.position + dir * (i as f32 * 0.5);
+                let pos = start_port.position + dir * (i as f32 * 0.5);
+                transform.translation = pos;
                 marble.velocity = Vec3::ZERO;
                 marble.current_segment = 0;
                 marble.previous_segment = 0;
                 marble.transition_distance = f32::MAX;
+                marble.previous_position = pos;
+                marble.physics_position = pos;
             }
             info!("All marbles reset to start");
         }
@@ -500,11 +532,14 @@ fn procedural_generation_controls(
         if let Some(start_port) = track.first_port() {
             let dir = start_port.direction;
             for (i, (mut transform, mut marble)) in marble_query.iter_mut().enumerate() {
-                transform.translation = start_port.position + dir * (i as f32 * 0.5);
+                let pos = start_port.position + dir * (i as f32 * 0.5);
+                transform.translation = pos;
                 marble.velocity = Vec3::ZERO;
                 marble.current_segment = 0;
                 marble.previous_segment = 0;
                 marble.transition_distance = f32::MAX;
+                marble.previous_position = pos;
+                marble.physics_position = pos;
             }
         }
     }
@@ -741,6 +776,7 @@ fn main() {
         .add_systems(
             Update,
             (
+                marble_interpolation,
                 time_scale_controls,
                 track_builder_controls,
                 procedural_generation_controls,
