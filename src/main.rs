@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 
 mod track;
-use track::{Track, SpiralTube, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, Segment, TrackGenerator, GeneratorConfig};
+use track::{Track, Port, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, Segment, TrackGenerator, GeneratorConfig};
 
 // ============================================================================
 // CONSTANTS
@@ -39,6 +39,10 @@ struct Marble {
     radius: f32,
     /// Index of the segment the marble is currently in (-1 if none)
     current_segment: i32,
+    /// Previous segment index (for gradient blending during transitions)
+    previous_segment: i32,
+    /// Distance traveled since last segment transition
+    transition_distance: f32,
 }
 
 #[derive(Component)]
@@ -94,43 +98,32 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Create track with multiple segments - testing overlap fix
+    // Create track with two straight tubes for testing
     let mut track = Track::new();
 
-    // Start with spiral tube
-    let spiral = SpiralTube::at_origin(2.0, 20.0, 5.0, TRACK_RADIUS);
-    let spine = spiral.spine().to_vec();
-    let exit_port = spiral.exit_ports()[0].clone();
-    info!("Segment 0 (SpiralTube): exit={:?} dir={:?}",
-        exit_port.position, exit_port.direction);
-    track.add_segment(Box::new(spiral));
+    // First straight tube with slope
+    let start_entry = Port::new(
+        Vec3::new(0.0, 10.0, 0.0),
+        Vec3::new(0.0, -0.2, -0.98).normalize(),  // Slight downward slope
+        Vec3::Y,
+        TRACK_RADIUS,
+    );
+    let straight1 = StraightTube::new(12.0, TRACK_RADIUS, start_entry.clone());
+    let exit_port = straight1.exit_ports()[0].clone();
+    track.add_segment(Box::new(straight1));
 
-    // Continue with straight tube
-    let straight = StraightTube::new(8.0, TRACK_RADIUS, exit_port.clone());
-    let exit_port = straight.exit_ports()[0].clone();
-    info!("Segment 1 (StraightTube): exit={:?} dir={:?}",
-        exit_port.position, exit_port.direction);
-    track.add_segment(Box::new(straight));
+    // Second straight tube (continues same direction)
+    let straight2 = StraightTube::new(12.0, TRACK_RADIUS, exit_port.clone());
+    let exit_port = straight2.exit_ports()[0].clone();
+    track.add_segment(Box::new(straight2));
 
-    // Add narrowing tube transition (very gentle narrowing)
-    let narrowing = NarrowingTube::new(8.0, TRACK_RADIUS, TRACK_RADIUS * 0.9, exit_port.clone());
-    let exit_port = narrowing.exit_ports()[0].clone();
-    info!("Segment 2 (NarrowingTube): exit={:?} dir={:?}",
-        exit_port.position, exit_port.direction);
-    track.add_segment(Box::new(narrowing));
+    // Third straight tube
+    let straight3 = StraightTube::new(12.0, TRACK_RADIUS, exit_port.clone());
+    track.add_segment(Box::new(straight3));
 
-    // Add widening tube back to normal
-    let widening = WideningTube::new(8.0, TRACK_RADIUS * 0.9, TRACK_RADIUS, exit_port.clone());
-    let exit_port = widening.exit_ports()[0].clone();
-    info!("Segment 3 (WideningTube): exit={:?} dir={:?}",
-        exit_port.position, exit_port.direction);
-    track.add_segment(Box::new(widening));
-
-    // End with flat slope
-    let slope = FlatSlope::new(10.0, 2.5, 1.0, 0.3, exit_port.clone());
-    info!("Segment 4 (FlatSlope): exit={:?} dir={:?}",
-        slope.exit_ports()[0].position, slope.exit_ports()[0].direction);
-    track.add_segment(Box::new(slope));
+    // Store start position for marble spawning
+    let marble_start = start_entry.position;
+    let marble_dir = start_entry.direction;
 
     commands.insert_resource(track);
 
@@ -148,7 +141,7 @@ fn setup(
 
     let mesh = meshes.add(Sphere::new(MARBLE_RADIUS));
     for (i, color) in marble_colors.iter().enumerate() {
-        let start_pos = spine[i * 2];
+        let start_pos = marble_start + marble_dir * (i as f32 * 0.5);
         commands.spawn((
             Mesh3d(mesh.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
@@ -161,7 +154,9 @@ fn setup(
             Marble {
                 velocity: Vec3::ZERO,
                 radius: MARBLE_RADIUS,
-                current_segment: 0, // Start in first segment
+                current_segment: 0,
+                previous_segment: 0,
+                transition_distance: f32::MAX, // Start fully transitioned
             },
             MarbleId(i),
         ));
@@ -218,10 +213,22 @@ fn marble_physics(
         }
 
         if penetration > 0.0 {
-            // Use current segment for gradient (prevents junction flip-flopping)
-            // Fall back to nearest segment if current is invalid
-            let normal = if marble.current_segment >= 0 {
-                track.segment_gradient(marble.current_segment as usize, next_pos)
+            // Use previous segment's gradient during transition buffer period
+            // This prevents the "lip" effect at segment junctions
+            const TRANSITION_BUFFER: f32 = 2.0; // Distance to travel before using new segment's gradient
+
+            let gradient_segment = if marble.transition_distance < TRANSITION_BUFFER
+                && marble.previous_segment >= 0
+                && marble.previous_segment != marble.current_segment
+            {
+                // Still in transition buffer - use previous segment's gradient
+                marble.previous_segment
+            } else {
+                marble.current_segment
+            };
+
+            let normal = if gradient_segment >= 0 {
+                track.segment_gradient(gradient_segment as usize, next_pos)
             } else {
                 track.sdf_gradient(next_pos)
             };
@@ -252,6 +259,10 @@ fn marble_physics(
             }
         }
 
+        // Update transition distance (distance traveled since last segment change)
+        let distance_traveled = marble.velocity.length() * dt;
+        marble.transition_distance += distance_traveled;
+
         // Track which segment the marble is in - only allow forward transitions
         // This prevents oscillation at junctions
         let detected_segment = track.find_segment(transform.translation);
@@ -280,7 +291,11 @@ fn marble_physics(
             };
             info!("Marble {} transitioned from segment {} to {} ({})",
                 marble_id.0, marble.current_segment, detected_segment, segment_name);
+
+            // Store previous segment for gradient blending
+            marble.previous_segment = marble.current_segment;
             marble.current_segment = detected_segment;
+            marble.transition_distance = 0.0; // Reset buffer
         }
 
         // Rolling rotation
@@ -420,6 +435,8 @@ fn restart_on_keypress(
                 transform.translation = start_port.position + dir * (i as f32 * 0.5);
                 marble.velocity = Vec3::ZERO;
                 marble.current_segment = 0;
+                marble.previous_segment = 0;
+                marble.transition_distance = f32::MAX;
             }
             info!("All marbles reset to start");
         }
@@ -455,6 +472,8 @@ fn procedural_generation_controls(
                 transform.translation = start_port.position + dir * (i as f32 * 0.5);
                 marble.velocity = Vec3::ZERO;
                 marble.current_segment = 0;
+                marble.previous_segment = 0;
+                marble.transition_distance = f32::MAX;
             }
         }
     }

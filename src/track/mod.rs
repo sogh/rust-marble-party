@@ -202,7 +202,7 @@ impl Track {
         Self {
             segments: Vec::new(),
             bounds: AABB::default(),
-            smooth_k: 1.0, // Smooth junction blending
+            smooth_k: 0.0, // No blending - segments connect seamlessly via overlap
         }
     }
 
@@ -395,10 +395,20 @@ pub fn smooth_min(a: f32, b: f32, k: f32) -> f32 {
     b * (1.0 - h) + a * h - k * h * (1.0 - h)
 }
 
-/// Capsule SDF helper
+/// Capsule SDF helper (has hemispherical end caps)
 pub fn capsule_sdf(point: Vec3, a: Vec3, b: Vec3, radius: f32) -> f32 {
     let pa = point - a;
     let ba = b - a;
     let h = (pa.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
     (pa - ba * h).length() - radius
+}
+
+/// Infinite cylinder SDF - distance to infinite line, no end caps
+/// Use this for tube segments to avoid hemispherical bumps at junctions
+pub fn infinite_cylinder_sdf(point: Vec3, a: Vec3, direction: Vec3, radius: f32) -> f32 {
+    let pa = point - a;
+    // Project out the axial component, leaving only radial
+    let axial = pa.dot(direction);
+    let radial_vec = pa - direction * axial;
+    radial_vec.length() - radius
 }

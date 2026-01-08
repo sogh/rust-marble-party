@@ -5,8 +5,8 @@ use rand_chacha::ChaCha8Rng;
 
 use super::{
     Port, Segment, Track,
-    SpiralTube, StraightTube, CurvedTube, FlatSlope,
-    NarrowingTube, WideningTube, HalfPipe,
+    StraightTube, CurvedTube, FlatSlope,
+    NarrowingTube, WideningTube, HalfPipe, SpiralTube,
 };
 
 /// Configuration for procedural track generation
@@ -146,14 +146,15 @@ impl TrackGenerator {
     pub fn generate(&mut self, num_segments: usize) -> Track {
         let mut track = Track::new();
 
-        // Start with a spiral to get things going
-        let spiral = SpiralTube::at_origin(
-            2.0,  // turns
-            15.0, // height descent
-            5.0,  // radius
+        // Start with a straight tube angled downward
+        let start_entry = Port::new(
+            Vec3::new(0.0, 10.0, 0.0),
+            Vec3::new(0.2, -0.3, 0.93).normalize(),
+            Vec3::Y,
             self.config.tube_radius,
         );
-        track.add_segment(Box::new(spiral));
+        let straight = StraightTube::new(12.0, self.config.tube_radius, start_entry);
+        track.add_segment(Box::new(straight));
 
         // Generate remaining segments
         for _ in 1..num_segments {

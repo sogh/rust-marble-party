@@ -75,42 +75,17 @@ impl Segment for NarrowingTube {
         let to_point = point - self.entry.position;
         let along = to_point.dot(axis_dir);
 
-        // Clamp t to extended range for overlap
-        let t_raw = along / axis_length;
-        let t = t_raw.clamp(0.0, 1.0);
-
-        // Get radius at this point along the tube
+        // Get t for radius interpolation (clamped to valid range)
+        let t = (along / axis_length).clamp(0.0, 1.0);
         let radius = self.radius_at(t);
 
-        // Distance from axis
+        // Distance from axis (radial distance with interpolated radius)
         let on_axis = self.entry.position + axis_dir * along;
-        let radial_dist = (point - on_axis).length();
+        let radial_dist = (point - on_axis).length() - radius;
 
-        // Distance to tube surface (negative inside, positive outside)
-        let tube_dist = radial_dist - radius;
-
-        // Handle end caps with extended overlap
-        let before_entry = -along - OVERLAP_DISTANCE;
-        let after_exit = along - axis_length - OVERLAP_DISTANCE;
-
-        if before_entry > 0.0 {
-            // Before entry cap
-            let cap_center = self.entry.position - axis_dir * OVERLAP_DISTANCE;
-            let to_cap = point - cap_center;
-            let dist_to_cap = to_cap.length() - self.entry_radius;
-            return -dist_to_cap.min(-tube_dist);
-        }
-
-        if after_exit > 0.0 {
-            // After exit cap
-            let cap_center = self.exit.position + axis_dir * OVERLAP_DISTANCE;
-            let to_cap = point - cap_center;
-            let dist_to_cap = to_cap.length() - self.exit_radius;
-            return -dist_to_cap.min(-tube_dist);
-        }
-
-        // Inside the tube body - negate for inside collision
-        -tube_dist
+        // Pure radial distance - no axial walls
+        // Adjacent segments handle their own regions seamlessly
+        -radial_dist
     }
 
     fn is_in_core_region(&self, point: Vec3) -> bool {

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::track::{Port, AABB, Segment, capsule_sdf};
+use crate::track::{Port, AABB, Segment, infinite_cylinder_sdf};
 
 /// A simple straight tube segment
 pub struct StraightTube {
@@ -52,22 +52,22 @@ impl StraightTube {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-const OVERLAP_DISTANCE: f32 = 1.0; // Matches tube_radius
+const OVERLAP_DISTANCE: f32 = 1.0;
 
 impl Segment for StraightTube {
     fn sdf(&self, point: Vec3) -> f32 {
-        // Extend the capsule past both endpoints for smooth junction blending
-        let extended_entry = self.entry.position - self.entry.direction * OVERLAP_DISTANCE;
-        let extended_exit = self.exit.position + self.exit.direction * OVERLAP_DISTANCE;
-
-        let dist = capsule_sdf(
+        // Use infinite cylinder for radial distance (no hemispherical caps)
+        let radial_dist = infinite_cylinder_sdf(
             point,
-            extended_entry,
-            extended_exit,
+            self.entry.position,
+            self.entry.direction,
             self.tube_radius,
         );
-        // Negate for inside collision
-        -dist
+
+        // Pure infinite cylinder - no axial walls
+        // Each segment provides the floor for marbles at its radial position
+        // Adjacent segments handle their own regions seamlessly
+        -radial_dist
     }
 
     fn is_in_core_region(&self, point: Vec3) -> bool {

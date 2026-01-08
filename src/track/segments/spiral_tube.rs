@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::track::{Port, AABB, Segment, capsule_sdf, smooth_min};
+use crate::track::{Port, AABB, Segment, infinite_cylinder_sdf, smooth_min};
 
 /// A helical tube segment that spirals downward
 pub struct SpiralTube {
@@ -123,26 +123,33 @@ impl Segment for SpiralTube {
             return f32::MAX;
         }
 
-        // Extend the first capsule backwards past entry for smooth junction blending
-        let extended_entry = self.spine[0] - self.entry.direction * OVERLAP_DISTANCE;
-        let mut dist = capsule_sdf(point, extended_entry, self.spine[1], self.tube_radius);
+        // Find the closest point along the spine and compute radial distance
+        let mut min_dist = f32::MAX;
 
-        // Middle capsules (no extension needed)
-        for i in 1..self.spine.len() - 2 {
-            let seg_dist = capsule_sdf(point, self.spine[i], self.spine[i + 1], self.tube_radius);
-            dist = smooth_min(dist, seg_dist, 0.5);
-        }
+        for i in 0..self.spine.len() - 1 {
+            let a = self.spine[i];
+            let b = self.spine[i + 1];
+            let segment_dir = (b - a).normalize_or_zero();
 
-        // Extend the last capsule forwards past exit for smooth junction blending
-        if self.spine.len() >= 2 {
-            let last_idx = self.spine.len() - 1;
-            let extended_exit = self.spine[last_idx] + self.exit.direction * OVERLAP_DISTANCE;
-            let seg_dist = capsule_sdf(point, self.spine[last_idx - 1], extended_exit, self.tube_radius);
-            dist = smooth_min(dist, seg_dist, 0.5);
+            // Use infinite cylinder for this segment
+            let cyl_dist = infinite_cylinder_sdf(point, a, segment_dir, self.tube_radius);
+
+            // Check axial bounds within this spine segment
+            let to_point = point - a;
+            let seg_len = (b - a).length();
+            let axial = to_point.dot(segment_dir);
+
+            // Only count if within this spine segment's axial range (no entry/exit caps)
+            if axial >= 0.0 && axial <= seg_len {
+                min_dist = min_dist.min(cyl_dist);
+            } else {
+                // Blend for nearby spine segments
+                min_dist = smooth_min(min_dist, cyl_dist, 0.5);
+            }
         }
 
         // Negate so collision is on INSIDE of tube
-        -dist
+        -min_dist
     }
 
     fn is_in_core_region(&self, point: Vec3) -> bool {
