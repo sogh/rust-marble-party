@@ -63,3 +63,13 @@ Cargo.toml     # Bevy 0.15 dependency
 cargo run          # Debug build
 cargo run -r       # Release build (faster physics)
 ```
+
+## Session Logging
+
+Keep a rough log of user prompts and work completed in `docs/logs/`. Each session should be recorded in a markdown file named `YYYY-MM-DD.md`. Include:
+- Date and approximate time
+- User requests/prompts (summarized)
+- Work completed
+- Key changes made
+
+This helps maintain continuity across sessions and provides a history of the project's evolution.
