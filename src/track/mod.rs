@@ -269,6 +269,58 @@ impl Track {
         min_dist
     }
 
+    /// Fast SDF check using only nearby segments (for known marble position)
+    /// Much faster than full sdf() when marble's current segment is known
+    pub fn sdf_near_segment(&self, point: Vec3, segment_hint: i32) -> f32 {
+        if self.segments.is_empty() {
+            return f32::MAX;
+        }
+
+        let hint = segment_hint.max(0) as usize;
+        let mut min_dist = f32::MAX;
+
+        // Only check current segment and neighbors
+        let start = hint.saturating_sub(1);
+        let end = (hint + 2).min(self.segments.len());
+
+        for i in start..end {
+            let dist = self.segments[i].sdf(point);
+            min_dist = min_dist.min(dist);
+        }
+
+        min_dist
+    }
+
+    /// Fast segment detection using locality (check nearby segments first)
+    pub fn find_segment_near(&self, point: Vec3, segment_hint: i32) -> i32 {
+        if self.segments.is_empty() {
+            return -1;
+        }
+
+        let hint = segment_hint.max(0) as usize;
+
+        // Check current and next segment only (marbles move forward)
+        for i in hint..(hint + 2).min(self.segments.len()) {
+            let bounds = self.segments[i].bounds();
+            if bounds.expanded(1.0).contains(point) {
+                let dist = self.segments[i].sdf(point);
+                if dist > 0.0 {
+                    return i as i32;
+                }
+            }
+        }
+
+        // Fallback: current segment if still valid
+        if hint < self.segments.len() {
+            let dist = self.segments[hint].sdf(point);
+            if dist > 0.0 {
+                return hint as i32;
+            }
+        }
+
+        segment_hint // Keep current if nothing better found
+    }
+
     /// Compute gradient (normal) from the nearest segment
     /// Uses the nearest segment's SDF directly to avoid blending artifacts at junctions
     pub fn sdf_gradient(&self, point: Vec3) -> Vec3 {

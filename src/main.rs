@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::time::{Fixed, Virtual};
 
 mod track;
 use track::{Track, Port, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, Segment, TrackGenerator, GeneratorConfig};
@@ -58,6 +59,18 @@ struct RedMarbleDebug {
     collision_normal: Vec3,
     sdf_distance: f32,
     penetration: f32,
+}
+
+/// Debug settings
+#[derive(Resource)]
+struct DebugSettings {
+    show_gizmos: bool,
+}
+
+impl Default for DebugSettings {
+    fn default() -> Self {
+        Self { show_gizmos: true }
+    }
 }
 
 /// Debug track builder state
@@ -187,13 +200,14 @@ fn setup(
 
 /// Physics system: apply gravity, check SDF penetration, resolve collision
 fn marble_physics(
-    time: Res<Time>,
-    time_scale: Res<PhysicsTimeScale>,
+    time: Res<Time<Fixed>>,
     track: Res<Track>,
     mut red_marble_debug: ResMut<RedMarbleDebug>,
     mut query: Query<(&mut Transform, &mut Marble, &MarbleId)>,
 ) {
-    let dt = time.delta_secs() * time_scale.0;
+    // Use fixed delta time directly - time scaling is handled by Virtual time
+    // which controls how many fixed steps run per frame
+    let dt = time.delta_secs();
 
     for (mut transform, mut marble, marble_id) in query.iter_mut() {
         // Apply gravity
@@ -202,8 +216,8 @@ fn marble_physics(
         // Predict next position
         let next_pos = transform.translation + marble.velocity * dt;
 
-        // Check SDF penetration using new Track system
-        let dist = track.sdf(next_pos);
+        // Check SDF penetration using fast local check
+        let dist = track.sdf_near_segment(next_pos, marble.current_segment);
         let penetration = marble.radius - dist;
 
         // Track debug info for red marble (marble 0)
@@ -264,8 +278,8 @@ fn marble_physics(
         marble.transition_distance += distance_traveled;
 
         // Track which segment the marble is in - only allow forward transitions
-        // This prevents oscillation at junctions
-        let detected_segment = track.find_segment(transform.translation);
+        // This prevents oscillation at junctions (uses fast local search)
+        let detected_segment = track.find_segment_near(transform.translation, marble.current_segment);
 
         // Only transition if:
         // 1. Moving forward (to next segment), OR
@@ -357,10 +371,22 @@ fn marble_collision(mut query: Query<(Entity, &mut Transform, &mut Marble)>) {
     }
 }
 
-/// Draw track using segment gizmos
-fn draw_track_gizmos(mut gizmos: Gizmos, track: Res<Track>) {
+/// Draw track using segment gizmos (toggleable with G key)
+fn draw_track_gizmos(mut gizmos: Gizmos, track: Res<Track>, debug: Res<DebugSettings>) {
+    if !debug.show_gizmos {
+        return;
+    }
     for segment in track.segments() {
         segment.draw_debug_gizmos(&mut gizmos, Color::srgb(0.2, 0.8, 0.2));
+    }
+}
+
+/// Toggle debug gizmos with G key
+fn toggle_gizmos(keyboard: Res<ButtonInput<KeyCode>>, mut debug_settings: ResMut<DebugSettings>) {
+    if keyboard.just_pressed(KeyCode::KeyG) {
+        debug_settings.show_gizmos = !debug_settings.show_gizmos;
+        let status = if debug_settings.show_gizmos { "ON" } else { "OFF" };
+        info!("Gizmos: {}", status);
     }
 }
 
@@ -401,20 +427,25 @@ fn reset_marble(mut query: Query<(&mut Transform, &mut Marble)>, track: Res<Trac
 }
 
 /// Press [ to slow down, ] to speed up, \ to reset speed
+/// Uses Virtual time to control simulation rate without changing physics step size
 fn time_scale_controls(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut time_scale: ResMut<PhysicsTimeScale>,
+    mut virtual_time: ResMut<Time<Virtual>>,
 ) {
     if keyboard.just_pressed(KeyCode::BracketLeft) {
         time_scale.0 = (time_scale.0 * 0.5).max(0.0625);
+        virtual_time.set_relative_speed(time_scale.0);
         info!("Physics speed: {}x", time_scale.0);
     }
     if keyboard.just_pressed(KeyCode::BracketRight) {
         time_scale.0 = (time_scale.0 * 2.0).min(4.0);
+        virtual_time.set_relative_speed(time_scale.0);
         info!("Physics speed: {}x", time_scale.0);
     }
     if keyboard.just_pressed(KeyCode::Backslash) {
         time_scale.0 = 1.0;
+        virtual_time.set_relative_speed(time_scale.0);
         info!("Physics speed: {}x", time_scale.0);
     }
 }
@@ -698,15 +729,22 @@ fn main() {
         .init_resource::<PhysicsTimeScale>()
         .init_resource::<RedMarbleDebug>()
         .init_resource::<TrackBuilder>()
+        .init_resource::<DebugSettings>()
         .add_systems(Startup, (setup, setup_debug_ui))
+        .add_systems(
+            FixedUpdate,
+            (
+                marble_physics,
+                marble_collision,
+            ),
+        )
         .add_systems(
             Update,
             (
                 time_scale_controls,
                 track_builder_controls,
                 procedural_generation_controls,
-                marble_physics,
-                marble_collision,
+                toggle_gizmos,
                 draw_track_gizmos,
                 camera_follow,
                 reset_marble,
