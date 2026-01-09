@@ -154,23 +154,24 @@ impl Segment for HalfPipe {
             let center = self.entry.position + self.direction * (self.length * t);
 
             // Draw semicircle using self.up for proper slope orientation
+            // Negate up so the curved floor is at the bottom (where marbles roll)
             let segments = 12;
             for j in 0..segments {
                 // Semicircle from -90 to +90 degrees
                 let angle1 = std::f32::consts::PI * (j as f32 / segments as f32 - 0.5);
                 let angle2 = std::f32::consts::PI * ((j + 1) as f32 / segments as f32 - 0.5);
 
-                let p1 = center + self.right * (angle1.sin() * self.radius) + self.up * (angle1.cos() * self.radius);
-                let p2 = center + self.right * (angle2.sin() * self.radius) + self.up * (angle2.cos() * self.radius);
+                let p1 = center + self.right * (angle1.sin() * self.radius) - self.up * (angle1.cos() * self.radius);
+                let p2 = center + self.right * (angle2.sin() * self.radius) - self.up * (angle2.cos() * self.radius);
 
                 gizmos.line(p1, p2, color);
             }
         }
 
-        // Draw edges along the length
+        // Draw edges along the length (floor at bottom, rims at sides)
         let edge_angles = [-std::f32::consts::FRAC_PI_2, 0.0, std::f32::consts::FRAC_PI_2];
         for angle in edge_angles {
-            let offset = self.right * (angle.sin() * self.radius) + self.up * (angle.cos() * self.radius);
+            let offset = self.right * (angle.sin() * self.radius) - self.up * (angle.cos() * self.radius);
             let start = self.entry.position + offset;
             let end = self.exit.position + offset;
             gizmos.line(start, end, color.with_alpha(0.5));
