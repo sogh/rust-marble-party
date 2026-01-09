@@ -36,19 +36,32 @@ struct FlatSlopeCorners {
 
 impl FlatSlope {
     pub fn new(length: f32, width: f32, wall_height: f32, slope_angle: f32, entry_port: Port) -> Self {
-        // Calculate the slope direction (entry direction rotated down by slope_angle)
-        let right = entry_port.direction.cross(entry_port.up).normalize();
+        // Get horizontal direction (project entry direction onto XZ plane)
+        let entry_horizontal = Vec3::new(
+            entry_port.direction.x,
+            0.0,
+            entry_port.direction.z,
+        ).normalize_or_zero();
 
-        // Calculate descent
+        // If entry is purely vertical, use a default direction
+        let horizontal_dir = if entry_horizontal.length_squared() < 0.01 {
+            Vec3::NEG_Z
+        } else {
+            entry_horizontal
+        };
+
+        let right = horizontal_dir.cross(Vec3::Y).normalize();
+
+        // Calculate exit position using ABSOLUTE slope angle from horizontal
+        // This avoids accumulating slope from the entry direction
         let horizontal_length = length * slope_angle.cos();
         let descent = length * slope_angle.sin();
 
-        // Exit position
         let exit_pos = entry_port.position
-            + entry_port.direction * horizontal_length
+            + horizontal_dir * horizontal_length
             - Vec3::Y * descent;
 
-        // Exit direction (same as entry, following the slope)
+        // Exit direction follows the slope (not the entry direction)
         let exit_dir = (exit_pos - entry_port.position).normalize();
 
         let exit = Port::new(
@@ -124,8 +137,10 @@ impl Segment for FlatSlope {
         let local = point - entry_pos;
         let along = local.dot(slope_dir);
 
-        // Reject points far outside the segment bounds (let other segments handle them)
-        if along < -OVERLAP_DISTANCE * 2.0 || along > slope_length + OVERLAP_DISTANCE * 2.0 {
+        // Reject points outside the segment bounds
+        // For FlatSlope, NO overlap at entry - marble drops onto the trough
+        // Small overlap at exit for transition to next segment
+        if along < 0.0 || along > slope_length + OVERLAP_DISTANCE {
             return f32::MAX;
         }
 

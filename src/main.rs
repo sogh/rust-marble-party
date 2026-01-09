@@ -134,10 +134,17 @@ fn setup(
     // Create track with straight tube followed by flat slope
     let mut track = Track::new();
 
+    // Slope angle for the track
+    let slope_angle: f32 = 0.15; // ~9° downward
+
+    // Small drop height for tube-to-trough transitions
+    // Marble drops from tube floor onto trough floor
+    let drop_height = MARBLE_RADIUS * 0.5;
+
     // First straight tube - sloped downward
     let start_entry = Port::new(
         Vec3::new(0.0, 8.0, 0.0),
-        Vec3::new(0.0, -0.15, -0.99).normalize(),  // ~9° downward slope
+        Vec3::new(0.0, -slope_angle.sin(), -slope_angle.cos()).normalize(),
         Vec3::Y,
         TRACK_RADIUS,
     );
@@ -145,33 +152,36 @@ fn setup(
     let tube_exit = straight1.exit_ports()[0].clone();
     track.add_segment(Box::new(straight1));
 
-    // Flat slope (trough with walls) - align floor with tube floor
-    // Tube exit port is at tube CENTER, but FlatSlope floor should match tube FLOOR
-    // Offset the entry position down by tube_radius so floors align
+    // Flat slope (trough) - positioned so marble drops from tube onto trough floor
+    // Tube floor is at: tube_exit.position.y - TRACK_RADIUS
+    // Trough floor should be slightly below that for a clean drop
+    let trough_floor_y = tube_exit.position.y - TRACK_RADIUS - drop_height;
     let slope_entry = Port::new(
-        tube_exit.position - Vec3::Y * TRACK_RADIUS,  // Floor-aligned position
-        tube_exit.direction,
-        tube_exit.up,
-        TRACK_RADIUS,  // Use tube radius for compatibility
+        Vec3::new(tube_exit.position.x, trough_floor_y, tube_exit.position.z),
+        Vec3::new(0.0, 0.0, -1.0),  // Horizontal direction, slope handles descent
+        Vec3::Y,
+        TRACK_RADIUS,
     );
     let slope = FlatSlope::new(
         20.0,                          // length
-        TRACK_RADIUS * 2.0,            // width = tube diameter
-        1.0,                           // wall height
-        0.15,                          // slope angle (~9°, matching tube)
+        TRACK_RADIUS * 2.5,            // slightly wider than tube for easier catch
+        1.5,                           // taller walls
+        slope_angle,                   // slope angle
         slope_entry,
     );
     let slope_exit = slope.exit_ports()[0].clone();
     track.add_segment(Box::new(slope));
 
-    // Exit tube after the slope - offset back up to tube center
+    // Exit tube - marble drops from trough floor into tube
+    // Tube center should be positioned so tube floor is below trough exit floor
+    let exit_tube_center_y = slope_exit.position.y - drop_height + TRACK_RADIUS;
     let exit_tube_entry = Port::new(
-        slope_exit.position + Vec3::Y * TRACK_RADIUS,  // Back to tube center
+        Vec3::new(slope_exit.position.x, exit_tube_center_y, slope_exit.position.z),
         slope_exit.direction,
-        slope_exit.up,
+        Vec3::Y,
         TRACK_RADIUS,
     );
-    let exit_tube = StraightTube::new(10.0, TRACK_RADIUS, exit_tube_entry);
+    let exit_tube = StraightTube::new(15.0, TRACK_RADIUS, exit_tube_entry);
     track.add_segment(Box::new(exit_tube));
 
     // Store start position for marble spawning
