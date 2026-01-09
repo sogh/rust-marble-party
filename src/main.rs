@@ -13,9 +13,9 @@ use track::{Track, Port, StraightTube, CurvedTube, FlatSlope, NarrowingTube, Wid
 const GRAVITY: Vec3 = Vec3::new(0.0, -20.0, 0.0);
 const MARBLE_RADIUS: f32 = 0.2;
 const TRACK_RADIUS: f32 = 1.0;
-const RESTITUTION: f32 = 0.6;
+const RESTITUTION: f32 = 0.3;  // Lower bounce for smoother rolling
 const MARBLE_RESTITUTION: f32 = 0.9;
-const FRICTION: f32 = 0.99;
+const FRICTION: f32 = 0.998;  // Higher friction for smoother curves
 
 // ============================================================================
 // RESOURCES
@@ -26,7 +26,7 @@ struct PhysicsTimeScale(f32);
 
 impl Default for PhysicsTimeScale {
     fn default() -> Self {
-        Self(1.0)
+        Self(1.0)  // Normal speed
     }
 }
 
@@ -63,6 +63,22 @@ struct RedMarbleDebug {
     collision_normal: Vec3,
     sdf_distance: f32,
     penetration: f32,
+}
+
+/// Timer for logging red marble position once per second
+#[derive(Resource)]
+struct PositionLogger {
+    timer: Timer,
+    elapsed_seconds: u32,
+}
+
+impl Default for PositionLogger {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(0.25, TimerMode::Repeating),  // More frequent for junction debug
+            elapsed_seconds: 0,
+        }
+    }
 }
 
 /// Debug settings
@@ -115,28 +131,33 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Create track with two straight tubes for testing
+    // Create track with straight tube followed by curved tube
     let mut track = Track::new();
 
-    // First straight tube with slope
+    // First straight tube with moderate slope
     let start_entry = Port::new(
-        Vec3::new(0.0, 10.0, 0.0),
-        Vec3::new(0.0, -0.2, -0.98).normalize(),  // Slight downward slope
+        Vec3::new(0.0, 15.0, 0.0),     // Higher start for more potential energy
+        Vec3::new(0.0, -0.20, -0.98).normalize(),  // Moderate ~12° downward slope
         Vec3::Y,
         TRACK_RADIUS,
     );
-    let straight1 = StraightTube::new(12.0, TRACK_RADIUS, start_entry.clone());
+    let straight1 = StraightTube::new(15.0, TRACK_RADIUS, start_entry.clone());  // Longer run-up
     let exit_port = straight1.exit_ports()[0].clone();
     track.add_segment(Box::new(straight1));
 
-    // Second straight tube (continues same direction)
-    let straight2 = StraightTube::new(12.0, TRACK_RADIUS, exit_port.clone());
-    let exit_port = straight2.exit_ports()[0].clone();
-    track.add_segment(Box::new(straight2));
+    // Curved tube with gentler 45° turn (easier to navigate)
+    let curved = CurvedTube::new(
+        std::f32::consts::FRAC_PI_4,  // 45 degree turn (easier than 90)
+        10.0,                          // Large arc radius for very smooth curve
+        TRACK_RADIUS,
+        exit_port,
+    );
+    let curve_exit = curved.exit_ports()[0].clone();
+    track.add_segment(Box::new(curved));
 
-    // Third straight tube
-    let straight3 = StraightTube::new(12.0, TRACK_RADIUS, exit_port.clone());
-    track.add_segment(Box::new(straight3));
+    // Continue with another straight segment after the curve
+    let straight2 = StraightTube::new(15.0, TRACK_RADIUS, curve_exit);
+    track.add_segment(Box::new(straight2));
 
     // Store start position for marble spawning
     let marble_start = start_entry.position;
@@ -158,7 +179,8 @@ fn setup(
 
     let mesh = meshes.add(Sphere::new(MARBLE_RADIUS));
     for (i, color) in marble_colors.iter().enumerate() {
-        let start_pos = marble_start + marble_dir * (i as f32 * 0.5);
+        // Space marbles further apart to avoid collision at spawn (diameter = 0.4, use 0.6 spacing)
+        let start_pos = marble_start + marble_dir * (i as f32 * 0.6);
         commands.spawn((
             Mesh3d(mesh.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
@@ -754,6 +776,44 @@ fn update_debug_ui(
 }
 
 // ============================================================================
+// POSITION LOGGING
+// ============================================================================
+
+fn log_red_marble_position(
+    time: Res<Time>,
+    mut logger: ResMut<PositionLogger>,
+    red_debug: Res<RedMarbleDebug>,
+    query: Query<(&Transform, &Marble, &MarbleId)>,
+) {
+    logger.timer.tick(time.delta());
+
+    if logger.timer.just_finished() {
+        logger.elapsed_seconds += 1;
+
+        for (transform, marble, marble_id) in query.iter() {
+            if marble_id.0 == 0 {
+                let pos = transform.translation;
+                let vel = marble.velocity;
+                let speed = vel.length();
+                let n = red_debug.collision_normal;
+                info!(
+                    "t={:.2}s pos:({:6.1},{:6.1},{:6.1}) vel:({:5.1},{:5.1},{:5.1}) spd:{:4.1} seg:{} col:{} pen:{:.3} norm:({:5.2},{:5.2},{:5.2})",
+                    logger.elapsed_seconds as f32 * 0.25,
+                    pos.x, pos.y, pos.z,
+                    vel.x, vel.y, vel.z,
+                    speed,
+                    marble.current_segment,
+                    if red_debug.is_colliding { "Y" } else { "N" },
+                    red_debug.penetration,
+                    n.x, n.y, n.z
+                );
+                break;
+            }
+        }
+    }
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -765,6 +825,7 @@ fn main() {
         .init_resource::<RedMarbleDebug>()
         .init_resource::<TrackBuilder>()
         .init_resource::<DebugSettings>()
+        .init_resource::<PositionLogger>()
         .add_systems(Startup, (setup, setup_debug_ui))
         .add_systems(
             FixedUpdate,
@@ -786,6 +847,7 @@ fn main() {
                 reset_marble,
                 restart_on_keypress,
                 update_debug_ui,
+                log_red_marble_position,
             ),
         )
         .run();

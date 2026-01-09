@@ -56,7 +56,9 @@ const OVERLAP_DISTANCE: f32 = 1.0;
 
 impl Segment for StraightTube {
     fn sdf(&self, point: Vec3) -> f32 {
-        // Use infinite cylinder for radial distance (no hemispherical caps)
+        // Pure infinite cylinder - no axial bounds
+        // This ensures seamless handoff at junctions with curves
+        // The max() in Track::sdf_near_segment will pick the best SDF
         let radial_dist = infinite_cylinder_sdf(
             point,
             self.entry.position,
@@ -64,9 +66,6 @@ impl Segment for StraightTube {
             self.tube_radius,
         );
 
-        // Pure infinite cylinder - no axial walls
-        // Each segment provides the floor for marbles at its radial position
-        // Adjacent segments handle their own regions seamlessly
         -radial_dist
     }
 
@@ -135,5 +134,16 @@ impl Segment for StraightTube {
 
     fn type_name(&self) -> &'static str {
         "StraightTube"
+    }
+
+    /// Analytic gradient for smooth physics
+    /// For an infinite cylinder, gradient is the radial direction
+    fn sdf_gradient(&self, point: Vec3) -> Vec3 {
+        let pa = point - self.entry.position;
+        let axial = pa.dot(self.entry.direction);
+        let radial_vec = pa - self.entry.direction * axial;
+
+        // Gradient points inward (since SDF is negated)
+        -radial_vec.normalize_or_zero()
     }
 }

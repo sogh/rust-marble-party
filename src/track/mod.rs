@@ -183,6 +183,17 @@ pub trait Segment: Send + Sync {
         let exit = self.primary_exit_port();
         entry.position.y - exit.position.y
     }
+
+    /// Compute the SDF gradient (surface normal) at a point
+    /// Default implementation uses central differences, but segments can override
+    /// with analytic gradients for smoother physics
+    fn sdf_gradient(&self, point: Vec3) -> Vec3 {
+        const EPS: f32 = 0.01;
+        let dx = self.sdf(point + Vec3::X * EPS) - self.sdf(point - Vec3::X * EPS);
+        let dy = self.sdf(point + Vec3::Y * EPS) - self.sdf(point - Vec3::Y * EPS);
+        let dz = self.sdf(point + Vec3::Z * EPS) - self.sdf(point - Vec3::Z * EPS);
+        Vec3::new(dx, dy, dz).normalize_or_zero()
+    }
 }
 
 // ============================================================================
@@ -277,7 +288,7 @@ impl Track {
         }
 
         let hint = segment_hint.max(0) as usize;
-        let mut min_dist = f32::MAX;
+        let mut best_dist = f32::NEG_INFINITY;
 
         // Only check current segment and neighbors
         let start = hint.saturating_sub(1);
@@ -285,10 +296,19 @@ impl Track {
 
         for i in start..end {
             let dist = self.segments[i].sdf(point);
-            min_dist = min_dist.min(dist);
+            // Use MAX for union of tubes - marble is inside if inside ANY tube
+            // Skip f32::MAX which indicates the segment rejected this point
+            if dist < f32::MAX * 0.5 {
+                best_dist = best_dist.max(dist);
+            }
         }
 
-        min_dist
+        // If no segment accepted the point, return a large negative (outside all)
+        if best_dist == f32::NEG_INFINITY {
+            return -100.0;
+        }
+
+        best_dist
     }
 
     /// Fast segment detection using locality (check nearby segments first)
@@ -359,18 +379,12 @@ impl Track {
     /// Compute gradient from a specific segment
     /// Used to maintain consistent collision normals through junctions
     pub fn segment_gradient(&self, segment_idx: usize, point: Vec3) -> Vec3 {
-        const EPS: f32 = 0.01;
-
         if segment_idx >= self.segments.len() {
             return self.sdf_gradient(point);
         }
 
-        let segment = &self.segments[segment_idx];
-        let dx = segment.sdf(point + Vec3::X * EPS) - segment.sdf(point - Vec3::X * EPS);
-        let dy = segment.sdf(point + Vec3::Y * EPS) - segment.sdf(point - Vec3::Y * EPS);
-        let dz = segment.sdf(point + Vec3::Z * EPS) - segment.sdf(point - Vec3::Z * EPS);
-
-        Vec3::new(dx, dy, dz).normalize_or_zero()
+        // Use the segment's own gradient method (can be analytic for smooth curves)
+        self.segments[segment_idx].sdf_gradient(point)
     }
 
     /// Get number of segments

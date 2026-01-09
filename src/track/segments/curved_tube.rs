@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::track::{Port, AABB, Segment, infinite_cylinder_sdf, smooth_min};
+use crate::track::{Port, AABB, Segment};
 
 /// A tube that curves in a horizontal arc
 pub struct CurvedTube {
@@ -23,7 +23,11 @@ pub struct CurvedTube {
 
 impl CurvedTube {
     pub fn new(arc_angle: f32, arc_radius: f32, tube_radius: f32, entry_port: Port) -> Self {
-        let segments = ((arc_angle.abs() / std::f32::consts::TAU) * 32.0).max(8.0) as usize;
+        // Many segments for smooth gradient transitions at physics timestep (64 Hz)
+        // At ~5 m/s marble speed, each physics step moves ~0.08m
+        // We want segment boundaries to be much smaller than this
+        // 512 base gives ~128 segments for 90° turn = ~0.04m per segment at radius 5
+        let segments = ((arc_angle.abs() / std::f32::consts::TAU) * 512.0).max(64.0) as usize;
 
         let mut tube = Self {
             arc_angle,
@@ -53,10 +57,27 @@ impl CurvedTube {
     fn generate_spine(&mut self) {
         self.spine.clear();
 
-        // Get the entry direction projected onto horizontal plane for curve calculation
-        let entry_dir_horizontal = Vec3::new(self.entry.direction.x, 0.0, self.entry.direction.z).normalize_or_zero();
+        // Calculate the descent rate (Y change per unit distance)
+        let horizontal_speed = Vec3::new(self.entry.direction.x, 0.0, self.entry.direction.z).length();
+        let descent_rate = if horizontal_speed > 0.01 {
+            self.entry.direction.y / horizontal_speed
+        } else {
+            0.0
+        };
 
-        // If entry is nearly vertical, use a default horizontal direction
+        // === LEAD-IN: Start with a straight section matching the entry direction ===
+        // This ensures seamless transition from the previous segment
+        // Use a longer lead-in (3 units) to give marble time to establish position
+        let lead_in_length = 3.0;
+        let lead_in_end = self.entry.position + self.entry.direction * lead_in_length;
+
+        self.spine.push(self.entry.position);
+        self.spine.push(lead_in_end);
+
+        // === ARC: Generate the curved section starting from lead-in end ===
+
+        // Get the entry direction projected onto horizontal plane
+        let entry_dir_horizontal = Vec3::new(self.entry.direction.x, 0.0, self.entry.direction.z).normalize_or_zero();
         let entry_dir_horizontal = if entry_dir_horizontal.length() < 0.1 {
             Vec3::NEG_Z
         } else {
@@ -64,41 +85,34 @@ impl CurvedTube {
         };
 
         // Calculate perpendicular direction (to the right of travel)
-        // Y cross direction gives right, direction cross Y gives left
-        let right = Vec3::Y.cross(entry_dir_horizontal).normalize();
+        let right = entry_dir_horizontal.cross(Vec3::Y).normalize();
 
-        // Calculate the center of the arc
-        let curve_center = if self.arc_angle > 0.0 {
-            // Curving left: center is to the left
-            self.entry.position - right * self.arc_radius
+        // Calculate the center of the arc (on horizontal plane) from the lead-in end
+        let lead_in_end_xz = Vec2::new(lead_in_end.x, lead_in_end.z);
+        let curve_center_xz = if self.arc_angle > 0.0 {
+            lead_in_end_xz - Vec2::new(right.x, right.z) * self.arc_radius
         } else {
-            // Curving right: center is to the right
-            self.entry.position + right * self.arc_radius
+            lead_in_end_xz + Vec2::new(right.x, right.z) * self.arc_radius
         };
 
-        // Calculate the starting angle from center to entry point
-        let to_entry = self.entry.position - curve_center;
-        let start_angle = to_entry.z.atan2(to_entry.x);
+        // Starting angle from center to lead-in end
+        let to_start = lead_in_end_xz - curve_center_xz;
+        let start_angle = to_start.y.atan2(to_start.x);
 
-        // Add a short straight lead-in aligned with entry direction
-        // This ensures tangent continuity at the junction
-        let lead_in_length = 0.5;
-        self.spine.push(self.entry.position);
-        self.spine.push(self.entry.position + entry_dir_horizontal * lead_in_length);
+        // Total arc length for descent calculation
+        let arc_length = self.arc_radius * self.arc_angle.abs();
 
-        // Adjust the arc to start from the lead-in end point
-        let arc_start = self.entry.position + entry_dir_horizontal * lead_in_length;
-        let to_arc_start = arc_start - curve_center;
-        let adjusted_start_angle = to_arc_start.z.atan2(to_arc_start.x);
-
-        // Generate spine points along the arc (skip first since we have lead-in)
+        // Generate arc points (skip first since lead-in end is already added)
         for i in 1..=self.segments {
             let t = i as f32 / self.segments as f32;
-            let angle = adjusted_start_angle + self.arc_angle * t;
+            let angle = start_angle - self.arc_angle * t;
 
-            let x = curve_center.x + self.arc_radius * angle.cos();
-            let z = curve_center.z + self.arc_radius * angle.sin();
-            let y = self.entry.position.y;
+            let x = curve_center_xz.x + self.arc_radius * angle.cos();
+            let z = curve_center_xz.y + self.arc_radius * angle.sin();
+
+            // Continue descent along the arc
+            let distance_along = lead_in_length + arc_length * t;
+            let y = self.entry.position.y + descent_rate * distance_along;
 
             self.spine.push(Vec3::new(x, y, z));
         }
@@ -106,7 +120,10 @@ impl CurvedTube {
         // Compute bounds
         self.bounds = AABB::from_points(&self.spine, self.tube_radius + 0.5);
 
-        // Compute exit port
+        // Keep original entry port - don't modify it so it matches the previous segment's exit
+        // Just ensure spine[0] is at the entry position (it should be by construction)
+
+        // Compute exit port from the last spine segment
         if self.spine.len() >= 2 {
             let last = self.spine[self.spine.len() - 1];
             let prev = self.spine[self.spine.len() - 2];
@@ -130,33 +147,65 @@ impl Segment for CurvedTube {
             return f32::MAX;
         }
 
-        // Find the closest point along the spine and compute radial distance
-        let mut min_dist = f32::MAX;
+        // Reject points far behind the entry to avoid interference with previous segment
+        // Use a generous margin (3.0) to allow smooth transition from the previous segment
+        let to_point_entry = point - self.entry.position;
+        let along_entry = to_point_entry.dot(self.entry.direction);
+        if along_entry < -3.0 {
+            return f32::MAX;
+        }
+
+        // Find distance to closest point on the spine polyline
+        // Track which segment and where on it the closest point is
+        let mut min_dist_sq = f32::MAX;
+        let mut closest_segment_idx = 0;
+        let mut closest_t = 0.0f32;
 
         for i in 0..self.spine.len() - 1 {
             let a = self.spine[i];
             let b = self.spine[i + 1];
-            let segment_dir = (b - a).normalize_or_zero();
+            let ab = b - a;
+            let ab_len_sq = ab.dot(ab);
 
-            // Use infinite cylinder for this segment
-            let cyl_dist = infinite_cylinder_sdf(point, a, segment_dir, self.tube_radius);
+            if ab_len_sq < 0.0001 {
+                let dist_sq = (point - a).length_squared();
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
+                    closest_segment_idx = i;
+                    closest_t = 0.0;
+                }
+                continue;
+            }
 
-            // Check axial bounds within this spine segment
-            let to_point = point - a;
-            let seg_len = (b - a).length();
-            let axial = to_point.dot(segment_dir);
+            let ap = point - a;
+            // Clamp t to [0,1] - this is critical!
+            let t = (ap.dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+            let closest_point = a + ab * t;
+            let dist_sq = (point - closest_point).length_squared();
 
-            // Only count if within this spine segment's axial range (no entry/exit caps)
-            if axial >= 0.0 && axial <= seg_len {
-                min_dist = min_dist.min(cyl_dist);
-            } else {
-                // Blend for nearby spine segments
-                min_dist = smooth_min(min_dist, cyl_dist, 0.5);
+            if dist_sq < min_dist_sq {
+                min_dist_sq = dist_sq;
+                closest_segment_idx = i;
+                closest_t = t;
             }
         }
 
-        // Negate for inside collision
-        -min_dist
+        // Reject points that project past the end of the spine
+        // If closest is on the last segment with t=1.0, point is at or past the exit
+        let last_segment_idx = self.spine.len() - 2;
+        if closest_segment_idx == last_segment_idx && closest_t > 0.99 {
+            // Check if point is actually past the exit (not just at the exit)
+            let to_point_exit = point - self.exit.position;
+            let along_exit = to_point_exit.dot(self.exit.direction);
+            if along_exit > 0.1 {
+                return f32::MAX;
+            }
+        }
+
+        // SDF = distance to spine minus tube radius
+        // Positive = inside tube (free space), Negative = in wall
+        let dist_to_spine = min_dist_sq.sqrt();
+        -(dist_to_spine - self.tube_radius)
     }
 
     fn is_in_core_region(&self, point: Vec3) -> bool {
@@ -211,9 +260,34 @@ impl Segment for CurvedTube {
     }
 
     fn draw_debug_gizmos(&self, gizmos: &mut Gizmos, color: Color) {
-        // Draw spine
+        // Draw spine with small spheres at each point
         for i in 0..self.spine.len() - 1 {
             gizmos.line(self.spine[i], self.spine[i + 1], color);
+        }
+        // Mark spine points
+        for (i, &point) in self.spine.iter().enumerate() {
+            let point_color = if i == 0 {
+                Color::srgb(0.0, 1.0, 1.0) // Cyan for first
+            } else if i == self.spine.len() - 1 {
+                Color::srgb(1.0, 0.0, 1.0) // Magenta for last
+            } else {
+                Color::srgb(1.0, 1.0, 1.0) // White for middle
+            };
+            gizmos.sphere(Isometry3d::from_translation(point), 0.05, point_color);
+        }
+
+        // Draw extended capsule endpoints (overlap regions)
+        if !self.spine.is_empty() {
+            let extended_entry = self.entry.position - self.entry.direction * OVERLAP_DISTANCE;
+            let extended_exit = self.exit.position + self.exit.direction * OVERLAP_DISTANCE;
+
+            // Draw extended lines in yellow
+            gizmos.line(extended_entry, self.entry.position, Color::srgb(1.0, 1.0, 0.0));
+            gizmos.line(self.exit.position, extended_exit, Color::srgb(1.0, 1.0, 0.0));
+
+            // Draw spheres at extended endpoints
+            gizmos.sphere(Isometry3d::from_translation(extended_entry), self.tube_radius, Color::srgb(1.0, 1.0, 0.0));
+            gizmos.sphere(Isometry3d::from_translation(extended_exit), self.tube_radius, Color::srgb(1.0, 0.5, 0.0));
         }
 
         // Draw cross-sections at intervals
@@ -236,15 +310,79 @@ impl Segment for CurvedTube {
             }
         }
 
-        // Entry/exit markers
-        gizmos.sphere(Isometry3d::from_translation(self.entry.position), 0.15, Color::srgb(0.0, 1.0, 0.0));
-        gizmos.ray(self.entry.position, self.entry.direction * 0.5, Color::srgb(0.0, 1.0, 0.0));
+        // Draw entry and exit circles
+        for (port, port_color) in [
+            (&self.entry, Color::srgb(0.0, 1.0, 0.0)),
+            (&self.exit, Color::srgb(1.0, 0.0, 0.0)),
+        ] {
+            let right = port.direction.cross(port.up).normalize_or_zero();
+            let up = right.cross(port.direction).normalize_or_zero();
 
-        gizmos.sphere(Isometry3d::from_translation(self.exit.position), 0.15, Color::srgb(1.0, 0.0, 0.0));
-        gizmos.ray(self.exit.position, self.exit.direction * 0.5, Color::srgb(1.0, 0.0, 0.0));
+            let segments = 16;
+            for j in 0..segments {
+                let angle1 = (j as f32 / segments as f32) * std::f32::consts::TAU;
+                let angle2 = ((j + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+
+                let p1 = port.position + (right * angle1.cos() + up * angle1.sin()) * self.tube_radius;
+                let p2 = port.position + (right * angle2.cos() + up * angle2.sin()) * self.tube_radius;
+
+                gizmos.line(p1, p2, port_color);
+            }
+
+            // Direction arrow
+            gizmos.ray(port.position, port.direction * 0.5, port_color);
+        }
     }
 
     fn type_name(&self) -> &'static str {
         "CurvedTube"
+    }
+
+    /// Analytic gradient for smooth physics
+    /// Points radially inward from the tube surface (since SDF is negated)
+    fn sdf_gradient(&self, point: Vec3) -> Vec3 {
+        if self.spine.len() < 2 {
+            return Vec3::Y;
+        }
+
+        // Find the closest point on the spine (same algorithm as SDF)
+        let mut min_dist_sq = f32::MAX;
+        let mut closest_point = self.spine[0];
+
+        for i in 0..self.spine.len() - 1 {
+            let a = self.spine[i];
+            let b = self.spine[i + 1];
+            let ab = b - a;
+            let ab_len_sq = ab.dot(ab);
+
+            if ab_len_sq < 0.0001 {
+                let dist_sq = (point - a).length_squared();
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
+                    closest_point = a;
+                }
+                continue;
+            }
+
+            let ap = point - a;
+            let t = (ap.dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+            let cp = a + ab * t;
+            let dist_sq = (point - cp).length_squared();
+
+            if dist_sq < min_dist_sq {
+                min_dist_sq = dist_sq;
+                closest_point = cp;
+            }
+        }
+
+        // Gradient points from marble toward spine center (inward for SDF convention)
+        // Our SDF is negative when outside, so gradient should point inward
+        let radial_dir = closest_point - point;
+        if radial_dir.length_squared() < 0.0001 {
+            // Point is on the spine - use up vector as fallback
+            return Vec3::Y;
+        }
+
+        radial_dir.normalize()
     }
 }
