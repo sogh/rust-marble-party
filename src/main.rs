@@ -3,7 +3,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::time::{Fixed, Virtual};
 
 mod track;
-use track::{Track, Port, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, Segment, TrackGenerator, GeneratorConfig};
+use track::{Track, Port, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, SpiralTube, Segment, TrackGenerator, GeneratorConfig};
 
 // ============================================================================
 // CONSTANTS
@@ -131,38 +131,50 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Create track with straight tube followed by half pipe
+    // Create track: straight tube -> spiral -> straight tube
     let mut track = Track::new();
 
-    // Slope angle for the track
-    let slope_angle: f32 = 0.15; // ~9° downward
+    // Spiral parameters
+    let helix_radius = 5.0;
+    let spiral_descent = 8.0;
+    let spiral_loops = 1.5;
+    let spiral_start_y = 12.0;
 
-    // First straight tube - sloped downward
-    let start_entry = Port::new(
-        Vec3::new(0.0, 8.0, 0.0),
-        Vec3::new(0.0, -slope_angle.sin(), -slope_angle.cos()).normalize(),
+    // The spiral starts at (helix_radius, spiral_start_y, 0) going tangent to the circle
+    // First tube should end there, coming from outside the spiral
+    let tube1_length = 8.0;
+    let tube1_start = Vec3::new(helix_radius + tube1_length, spiral_start_y + 1.0, 0.0);
+    let tube1_dir = Vec3::new(-1.0, -0.1, 0.0).normalize(); // Going left and slightly down
+
+    let tube1_entry = Port::new(tube1_start, tube1_dir, Vec3::Y, TRACK_RADIUS);
+    let tube1 = StraightTube::new(tube1_length, TRACK_RADIUS, tube1_entry.clone());
+    let tube1_exit = tube1.exit_ports()[0].clone();
+    track.add_segment(Box::new(tube1));
+
+    // Spiral tube - starts near where tube1 exits
+    // The spiral generates its own geometry starting at (helix_radius, entry_y, 0)
+    let spiral_entry = Port::new(
+        tube1_exit.position,
+        Vec3::new(0.0, -0.2, 1.0).normalize(), // Tangent to spiral start
         Vec3::Y,
         TRACK_RADIUS,
     );
-    let straight1 = StraightTube::new(10.0, TRACK_RADIUS, start_entry.clone());
-    let tube_exit = straight1.exit_ports()[0].clone();
-    track.add_segment(Box::new(straight1));
-
-    // Half pipe - connects seamlessly to tube (same geometry at floor level)
-    // Both have same radius, and HalfPipe center = tube center, so floors align
-    let halfpipe_entry = Port::new(
-        tube_exit.position,
-        tube_exit.direction,
-        Vec3::Y,
+    let spiral = SpiralTube::new(
+        spiral_loops,
+        spiral_descent,
+        helix_radius,
         TRACK_RADIUS,
+        spiral_entry,
     );
-    let halfpipe = HalfPipe::new(20.0, TRACK_RADIUS, halfpipe_entry);
-    let halfpipe_exit = halfpipe.exit_ports()[0].clone();
-    track.add_segment(Box::new(halfpipe));
+    let spiral_exit = spiral.exit_ports()[0].clone();
+    track.add_segment(Box::new(spiral));
 
-    // Exit tube after half pipe
-    let exit_tube = StraightTube::new(15.0, TRACK_RADIUS, halfpipe_exit);
+    // Exit tube continues from spiral
+    let exit_tube = StraightTube::new(10.0, TRACK_RADIUS, spiral_exit);
     track.add_segment(Box::new(exit_tube));
+
+    // Store start position for marble spawning
+    let start_entry = tube1_entry.clone();
 
     // Store start position for marble spawning
     // Offset down to tube floor so marbles start in contact with surface
