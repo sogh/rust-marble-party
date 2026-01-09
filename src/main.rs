@@ -131,15 +131,11 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Create track with straight tube followed by flat slope
+    // Create track with straight tube followed by half pipe
     let mut track = Track::new();
 
     // Slope angle for the track
     let slope_angle: f32 = 0.15; // ~9° downward
-
-    // Small drop height for tube-to-trough transitions
-    // Marble drops from tube floor onto trough floor
-    let drop_height = MARBLE_RADIUS * 0.5;
 
     // First straight tube - sloped downward
     let start_entry = Port::new(
@@ -152,36 +148,20 @@ fn setup(
     let tube_exit = straight1.exit_ports()[0].clone();
     track.add_segment(Box::new(straight1));
 
-    // Flat slope (trough) - positioned so marble drops from tube onto trough floor
-    // Tube floor is at: tube_exit.position.y - TRACK_RADIUS
-    // Trough floor should be slightly below that for a clean drop
-    let trough_floor_y = tube_exit.position.y - TRACK_RADIUS - drop_height;
-    let slope_entry = Port::new(
-        Vec3::new(tube_exit.position.x, trough_floor_y, tube_exit.position.z),
-        Vec3::new(0.0, 0.0, -1.0),  // Horizontal direction, slope handles descent
+    // Half pipe - connects seamlessly to tube (same geometry at floor level)
+    // Both have same radius, and HalfPipe center = tube center, so floors align
+    let halfpipe_entry = Port::new(
+        tube_exit.position,
+        tube_exit.direction,
         Vec3::Y,
         TRACK_RADIUS,
     );
-    let slope = FlatSlope::new(
-        20.0,                          // length
-        TRACK_RADIUS * 2.5,            // slightly wider than tube for easier catch
-        1.5,                           // taller walls
-        slope_angle,                   // slope angle
-        slope_entry,
-    );
-    let slope_exit = slope.exit_ports()[0].clone();
-    track.add_segment(Box::new(slope));
+    let halfpipe = HalfPipe::new(20.0, TRACK_RADIUS, halfpipe_entry);
+    let halfpipe_exit = halfpipe.exit_ports()[0].clone();
+    track.add_segment(Box::new(halfpipe));
 
-    // Exit tube - marble drops from trough floor into tube
-    // Tube center should be positioned so tube floor is below trough exit floor
-    let exit_tube_center_y = slope_exit.position.y - drop_height + TRACK_RADIUS;
-    let exit_tube_entry = Port::new(
-        Vec3::new(slope_exit.position.x, exit_tube_center_y, slope_exit.position.z),
-        slope_exit.direction,
-        Vec3::Y,
-        TRACK_RADIUS,
-    );
-    let exit_tube = StraightTube::new(15.0, TRACK_RADIUS, exit_tube_entry);
+    // Exit tube after half pipe
+    let exit_tube = StraightTube::new(15.0, TRACK_RADIUS, halfpipe_exit);
     track.add_segment(Box::new(exit_tube));
 
     // Store start position for marble spawning

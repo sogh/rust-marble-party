@@ -20,6 +20,8 @@ pub struct HalfPipe {
     direction: Vec3,
     /// Right vector (perpendicular, toward wall)
     right: Vec3,
+    /// Up vector (perpendicular to direction and right, for sloped half-pipes)
+    up: Vec3,
 }
 
 impl HalfPipe {
@@ -34,6 +36,10 @@ impl HalfPipe {
             right
         };
 
+        // Up vector is perpendicular to both direction and right
+        // This handles sloped half-pipes correctly
+        let up = right.cross(direction).normalize();
+
         let exit_pos = entry_port.position + direction * length;
         let exit = Port::new(
             exit_pos,
@@ -42,13 +48,13 @@ impl HalfPipe {
             radius,
         );
 
-        // Bounds include the curved walls
+        // Bounds include the curved walls (use up instead of Vec3::Y for slopes)
         let bounds = AABB::from_points(
             &[
-                entry_port.position + right * radius + Vec3::Y * radius,
-                entry_port.position - right * radius,
-                exit_pos + right * radius + Vec3::Y * radius,
-                exit_pos - right * radius,
+                entry_port.position + right * radius + up * radius,
+                entry_port.position - right * radius - up * radius,
+                exit_pos + right * radius + up * radius,
+                exit_pos - right * radius - up * radius,
             ],
             0.5,
         );
@@ -62,6 +68,7 @@ impl HalfPipe {
             bounds,
             direction,
             right,
+            up,
         }
     }
 
@@ -83,53 +90,40 @@ const OVERLAP_DISTANCE: f32 = 1.0;
 impl Segment for HalfPipe {
     fn sdf(&self, point: Vec3) -> f32 {
         // Transform point to local space
-        // Local: X = right, Y = up, Z = direction
+        // Local: X = right, Y = up (perpendicular to slope), Z = direction
         let local_origin = self.entry.position;
         let to_point = point - local_origin;
 
         let local_z = to_point.dot(self.direction); // Along half pipe
         let local_x = to_point.dot(self.right);     // Across half pipe
-        let local_y = to_point.dot(Vec3::Y);        // Up
+        let local_y = to_point.dot(self.up);        // Up (perpendicular to slope)
 
-        // Clamp Z to pipe length (with overlap)
-        let z_before = -local_z - OVERLAP_DISTANCE;
-        let z_after = local_z - self.length - OVERLAP_DISTANCE;
+        // Reject points outside the segment bounds (like tubes do)
+        // Allow OVERLAP_DISTANCE before entry for seamless tube connection
+        if local_z < -OVERLAP_DISTANCE || local_z > self.length + OVERLAP_DISTANCE {
+            return f32::MAX;
+        }
 
-        // Distance from the center axis (at floor level)
-        // The half-pipe is a semicircle with center at y=0
-        let center_y = 0.0;
-        let dy = local_y - center_y;
+        // Distance from the center axis (which follows the slope)
+        // The half-pipe is a semicircle in the local XY plane
+        // Free space is ABOVE the curved floor (positive SDF)
+        // Solid is BELOW the curved floor (negative SDF)
+        let dist_from_center = (local_x * local_x + local_y * local_y).sqrt();
 
-        // Only consider the bottom half (y <= radius from center)
-        // The half pipe is like a U shape when viewed from the end
-
-        // Distance to the curved floor
-        let dist_from_center = (local_x * local_x + dy * dy).sqrt();
+        // SDF: positive when above curved floor (free space), negative when in floor (solid)
+        // This matches tube convention: positive = inside track, negative = in wall
         let curved_dist = dist_from_center - self.radius;
 
-        // Only apply the curved surface for the lower half
-        // Above the rim, it's open space
-        if local_y > self.radius {
-            // Above the half pipe - open
-            let rim_dist = local_y - self.radius;
-
-            // But still bound by X (wall edges)
-            if local_x.abs() > self.radius {
-                // Outside the walls
-                let wall_dist = local_x.abs() - self.radius;
-                return (rim_dist.powi(2) + wall_dist.powi(2)).sqrt();
-            }
-            return -rim_dist; // Open above
+        // Above the rim (local_y > radius), it's open air - not our concern
+        // But we still provide collision for the curved wall surface
+        if local_y > self.radius && local_x.abs() <= self.radius {
+            // Above the half pipe opening - open air, very far from surface
+            return f32::MAX;
         }
 
-        // Handle end caps
-        if z_before > 0.0 || z_after > 0.0 {
-            let end_dist = z_before.max(z_after);
-            return -curved_dist.min(-end_dist);
-        }
-
-        // Inside the half pipe region
-        -curved_dist
+        // For the semicircle region (local_y <= 0 means in lower half)
+        // or on the curved walls (|local_x| approaches radius with local_y > 0)
+        curved_dist
     }
 
     fn is_in_core_region(&self, point: Vec3) -> bool {
@@ -159,15 +153,15 @@ impl Segment for HalfPipe {
         for t in positions {
             let center = self.entry.position + self.direction * (self.length * t);
 
-            // Draw semicircle
+            // Draw semicircle using self.up for proper slope orientation
             let segments = 12;
             for j in 0..segments {
                 // Semicircle from -90 to +90 degrees
                 let angle1 = std::f32::consts::PI * (j as f32 / segments as f32 - 0.5);
                 let angle2 = std::f32::consts::PI * ((j + 1) as f32 / segments as f32 - 0.5);
 
-                let p1 = center + self.right * (angle1.sin() * self.radius) + Vec3::Y * (angle1.cos() * self.radius);
-                let p2 = center + self.right * (angle2.sin() * self.radius) + Vec3::Y * (angle2.cos() * self.radius);
+                let p1 = center + self.right * (angle1.sin() * self.radius) + self.up * (angle1.cos() * self.radius);
+                let p2 = center + self.right * (angle2.sin() * self.radius) + self.up * (angle2.cos() * self.radius);
 
                 gizmos.line(p1, p2, color);
             }
@@ -176,7 +170,7 @@ impl Segment for HalfPipe {
         // Draw edges along the length
         let edge_angles = [-std::f32::consts::FRAC_PI_2, 0.0, std::f32::consts::FRAC_PI_2];
         for angle in edge_angles {
-            let offset = self.right * (angle.sin() * self.radius) + Vec3::Y * (angle.cos() * self.radius);
+            let offset = self.right * (angle.sin() * self.radius) + self.up * (angle.cos() * self.radius);
             let start = self.entry.position + offset;
             let end = self.exit.position + offset;
             gizmos.line(start, end, color.with_alpha(0.5));
