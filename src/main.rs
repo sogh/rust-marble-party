@@ -131,36 +131,39 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Create track with straight tube followed by curved tube
+    // Create track with straight tube followed by flat slope
     let mut track = Track::new();
 
-    // First straight tube with moderate slope
+    // First straight tube - HORIZONTAL so marbles roll on the floor
     let start_entry = Port::new(
-        Vec3::new(0.0, 15.0, 0.0),     // Higher start for more potential energy
-        Vec3::new(0.0, -0.20, -0.98).normalize(),  // Moderate ~12° downward slope
+        Vec3::new(0.0, 5.0, 0.0),
+        Vec3::NEG_Z,  // Pure horizontal, no tilt
         Vec3::Y,
         TRACK_RADIUS,
     );
-    let straight1 = StraightTube::new(15.0, TRACK_RADIUS, start_entry.clone());  // Longer run-up
-    let exit_port = straight1.exit_ports()[0].clone();
+    let straight1 = StraightTube::new(8.0, TRACK_RADIUS, start_entry.clone());
+    let tube_exit = straight1.exit_ports()[0].clone();
     track.add_segment(Box::new(straight1));
 
-    // Curved tube with gentler 45° turn (easier to navigate)
-    let curved = CurvedTube::new(
-        std::f32::consts::FRAC_PI_4,  // 45 degree turn (easier than 90)
-        10.0,                          // Large arc radius for very smooth curve
-        TRACK_RADIUS,
-        exit_port,
+    // Flat slope (trough with walls) - descending
+    let slope = FlatSlope::new(
+        25.0,                          // longer length
+        TRACK_RADIUS * 2.0,            // width = tube diameter
+        1.0,                           // wall height
+        0.2,                           // gentler slope angle (~12°)
+        tube_exit,
     );
-    let curve_exit = curved.exit_ports()[0].clone();
-    track.add_segment(Box::new(curved));
+    let slope_exit = slope.exit_ports()[0].clone();
+    track.add_segment(Box::new(slope));
 
-    // Continue with another straight segment after the curve
-    let straight2 = StraightTube::new(15.0, TRACK_RADIUS, curve_exit);
-    track.add_segment(Box::new(straight2));
+    // Exit tube after the slope
+    let exit_tube = StraightTube::new(10.0, TRACK_RADIUS, slope_exit);
+    track.add_segment(Box::new(exit_tube));
 
     // Store start position for marble spawning
-    let marble_start = start_entry.position;
+    // Offset down to tube floor so marbles start in contact with surface
+    let tube_floor_offset = Vec3::Y * -(TRACK_RADIUS - MARBLE_RADIUS - 0.01);
+    let marble_start = start_entry.position + tube_floor_offset;
     let marble_dir = start_entry.direction;
 
     commands.insert_resource(track);
@@ -179,7 +182,7 @@ fn setup(
 
     let mesh = meshes.add(Sphere::new(MARBLE_RADIUS));
     for (i, color) in marble_colors.iter().enumerate() {
-        // Space marbles further apart to avoid collision at spawn (diameter = 0.4, use 0.6 spacing)
+        // Space marbles along tube direction
         let start_pos = marble_start + marble_dir * (i as f32 * 0.6);
         commands.spawn((
             Mesh3d(mesh.clone()),
@@ -191,7 +194,7 @@ fn setup(
             })),
             Transform::from_translation(start_pos),
             Marble {
-                velocity: Vec3::ZERO,
+                velocity: marble_dir * 3.0, // Initial push forward
                 radius: MARBLE_RADIUS,
                 current_segment: 0,
                 previous_segment: 0,

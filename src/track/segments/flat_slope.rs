@@ -118,32 +118,27 @@ impl Segment for FlatSlope {
         let exit_pos = self.exit.position;
         let slope_vec = exit_pos - entry_pos;
         let slope_length = slope_vec.length();
-
-        // Horizontal direction (project slope onto XZ plane)
-        let horizontal_dir = Vec3::new(slope_vec.x, 0.0, slope_vec.z).normalize_or_zero();
-        let right = horizontal_dir.cross(Vec3::Y).normalize_or_zero();
-
-        // If horizontal_dir is zero (vertical slope), use entry direction
-        let horizontal_dir = if horizontal_dir.length_squared() < 0.01 {
-            Vec3::new(self.entry.direction.x, 0.0, self.entry.direction.z).normalize_or_zero()
-        } else {
-            horizontal_dir
-        };
-        let right = if right.length_squared() < 0.01 {
-            self.entry.direction.cross(Vec3::Y).normalize_or_zero()
-        } else {
-            right
-        };
+        let slope_dir = slope_vec.normalize();
 
         // Project point relative to entry
         let local = point - entry_pos;
-
-        // Distance along the slope direction (use actual 3D slope direction for t)
-        let slope_dir = slope_vec.normalize();
         let along = local.dot(slope_dir);
-        let t = (along / slope_length).clamp(0.0, 1.0);
 
-        // Find the closest point on the slope centerline
+        // Reject points far outside the segment bounds (let other segments handle them)
+        if along < -OVERLAP_DISTANCE * 2.0 || along > slope_length + OVERLAP_DISTANCE * 2.0 {
+            return f32::MAX;
+        }
+
+        // Horizontal direction (project slope onto XZ plane)
+        let horizontal_dir = Vec3::new(slope_vec.x, 0.0, slope_vec.z).normalize_or_zero();
+        let right = if horizontal_dir.length_squared() > 0.01 {
+            horizontal_dir.cross(Vec3::Y).normalize_or_zero()
+        } else {
+            self.entry.direction.cross(Vec3::Y).normalize_or_zero()
+        };
+
+        // Clamp t to [0,1] for closest point calculation
+        let t = (along / slope_length).clamp(0.0, 1.0);
         let closest_on_line = entry_pos + slope_vec * t;
 
         // Distance across (perpendicular to slope in XZ plane)
@@ -153,31 +148,45 @@ impl Segment for FlatSlope {
         let floor_y = closest_on_line.y;
         let height_above_floor = point.y - floor_y;
 
-        // Distance to floor (positive = above floor, which is good)
-        let floor_dist = -height_above_floor; // Negative when above floor
-
         // Distance to walls
         let half_width = self.width / 2.0;
-        let left_wall_dist = -half_width - across;
-        let right_wall_dist = across - half_width;
-        let wall_dist = left_wall_dist.max(right_wall_dist);
+        let dist_to_left_wall = across + half_width;   // Positive when inside
+        let dist_to_right_wall = half_width - across;  // Positive when inside
 
-        // Distance to end caps (with overlap for blending)
-        let entry_dist = -along - OVERLAP_DISTANCE;
-        let exit_dist = along - slope_length - OVERLAP_DISTANCE;
-        let cap_dist = entry_dist.max(exit_dist);
+        // For a trough/channel, marble is "inside" when:
+        // - Above the floor (height_above_floor > 0)
+        // - Between the walls (both wall distances > 0)
+        // - Within longitudinal bounds (checked above)
 
-        // Combine all constraints
-        // Inside trough when: above floor (floor_dist < 0), between walls (wall_dist < 0), between caps (cap_dist < 0)
-        let outside_dist = floor_dist.max(wall_dist).max(cap_dist);
+        // SDF convention: positive = inside (free space), negative = in wall
+        // The SDF is the minimum distance to any surface (floor or walls)
+        // Take min of floor distance and wall distances
 
-        // If above wall height and within bounds, it's open space
-        let above_walls = height_above_floor - self.wall_height;
-        if above_walls > 0.0 && wall_dist < 0.0 && cap_dist < 0.0 {
-            return -above_walls;
+        if height_above_floor < 0.0 {
+            // Below floor - return negative (in solid)
+            return height_above_floor;
         }
 
-        outside_dist
+        if height_above_floor > self.wall_height {
+            // Above walls - open space, return clearance above walls
+            if dist_to_left_wall > 0.0 && dist_to_right_wall > 0.0 {
+                return height_above_floor - self.wall_height;
+            }
+        }
+
+        // Inside the channel - return distance to nearest surface
+        // This is the minimum clearance to floor or walls
+        let floor_clearance = height_above_floor;
+        let wall_clearance = dist_to_left_wall.min(dist_to_right_wall);
+
+        // Return the minimum clearance (but negative if we're outside walls)
+        if wall_clearance < 0.0 {
+            // Outside a wall
+            return wall_clearance;
+        }
+
+        // Inside channel - return clearance to nearest surface
+        floor_clearance.min(wall_clearance)
     }
 
     fn is_in_core_region(&self, point: Vec3) -> bool {
