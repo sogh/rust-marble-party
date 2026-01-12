@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::track::{Port, AABB, Segment};
+use crate::track::{Port, PortProfile, AABB, Segment};
 
 /// A half-pipe (open half-cylinder) that marbles can roll along
 /// Marbles can ride on the curved walls and do tricks
@@ -41,11 +41,22 @@ impl HalfPipe {
         let up = right.cross(direction).normalize();
 
         let exit_pos = entry_port.position + direction * length;
-        let exit = Port::new(
+
+        // Create entry port with HalfPipe profile
+        let entry_with_profile = Port::with_profile(
+            entry_port.position,
+            entry_port.direction,
+            entry_port.up,
+            radius,
+            PortProfile::half_pipe(radius),
+        );
+
+        let exit = Port::with_profile(
             exit_pos,
             direction,
             entry_port.up,
             radius,
+            PortProfile::half_pipe(radius),
         );
 
         // Bounds include the curved walls (use up instead of Vec3::Y for slopes)
@@ -63,7 +74,7 @@ impl HalfPipe {
             length,
             radius,
             wall_thickness: 0.2,
-            entry: entry_port,
+            entry: entry_with_profile,
             exit,
             bounds,
             direction,
@@ -74,11 +85,12 @@ impl HalfPipe {
 
     /// Create at origin pointing in -Z direction
     pub fn at_origin(length: f32, radius: f32) -> Self {
-        let entry = Port::new(
+        let entry = Port::with_profile(
             Vec3::ZERO,
             Vec3::NEG_Z,
             Vec3::Y,
             radius,
+            PortProfile::half_pipe(radius),
         );
         Self::new(length, radius, entry)
     }

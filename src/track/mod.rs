@@ -8,6 +8,99 @@ pub use segments::*;
 pub use generator::{TrackGenerator, GeneratorConfig, ProceduralTrack};
 
 // ============================================================================
+// PORT PROFILE - Cross-sectional shape of a connection point
+// ============================================================================
+
+/// Describes the cross-sectional profile of a port.
+/// This determines what types of segments can connect seamlessly.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PortProfile {
+    /// Full circular tube - marble enclosed on all sides.
+    /// Tubes can only connect to tubes/half-pipes with matching diameter.
+    Tube {
+        /// Inner diameter of the tube
+        diameter: f32,
+    },
+
+    /// Half-pipe (roofless tube) - semicircular floor, open top.
+    /// Treated like a tube for connection purposes (same diameter rules).
+    HalfPipe {
+        /// Diameter of the half-pipe curve
+        diameter: f32,
+    },
+
+    /// Flat floor with walls (trough/gutter style).
+    /// When connecting from a tube, the tube's bottom must be at or above the floor.
+    FlatFloor {
+        /// Width between walls
+        width: f32,
+        /// Y-coordinate of the floor at this port (world space)
+        floor_y: f32,
+    },
+
+    /// Funnel or bowl opening - can accept any profile
+    /// Used for collectors that gather marbles from various sources
+    Open {
+        /// Opening diameter/width
+        size: f32,
+    },
+}
+
+impl PortProfile {
+    /// Create a tube profile from radius
+    pub fn tube(radius: f32) -> Self {
+        Self::Tube { diameter: radius * 2.0 }
+    }
+
+    /// Create a half-pipe profile from radius
+    pub fn half_pipe(radius: f32) -> Self {
+        Self::HalfPipe { diameter: radius * 2.0 }
+    }
+
+    /// Create a flat floor profile
+    pub fn flat_floor(width: f32, floor_y: f32) -> Self {
+        Self::FlatFloor { width, floor_y }
+    }
+
+    /// Create an open (accepting any) profile
+    pub fn open(size: f32) -> Self {
+        Self::Open { size }
+    }
+
+    /// Get the effective diameter/width of this profile
+    pub fn effective_width(&self) -> f32 {
+        match self {
+            Self::Tube { diameter } => *diameter,
+            Self::HalfPipe { diameter } => *diameter,
+            Self::FlatFloor { width, .. } => *width,
+            Self::Open { size } => *size,
+        }
+    }
+
+    /// Check if this is a circular profile (tube or half-pipe)
+    pub fn is_circular(&self) -> bool {
+        matches!(self, Self::Tube { .. } | Self::HalfPipe { .. })
+    }
+
+    /// Check if this is a flat floor profile
+    pub fn is_flat(&self) -> bool {
+        matches!(self, Self::FlatFloor { .. })
+    }
+}
+
+/// Error when segments cannot connect
+#[derive(Clone, Debug)]
+pub struct ConnectionError {
+    pub reason: String,
+}
+
+impl std::fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.reason)
+    }
+}
+
+// ============================================================================
 // PORT - Connection point between segments
 // ============================================================================
 
@@ -20,28 +113,153 @@ pub struct Port {
     pub direction: Vec3,
     /// Up vector for orientation
     pub up: Vec3,
-    /// Channel radius at this point
+    /// Channel radius at this point (legacy, use profile for new code)
     pub radius: f32,
+    /// Cross-sectional profile at this port
+    pub profile: PortProfile,
 }
 
 impl Port {
+    /// Create a new port with a tube profile (default for backwards compatibility)
     pub fn new(position: Vec3, direction: Vec3, up: Vec3, radius: f32) -> Self {
         Self {
             position,
             direction: direction.normalize(),
             up: up.normalize(),
             radius,
+            profile: PortProfile::tube(radius),
         }
     }
 
-    /// Check if another port can connect to this one
+    /// Create a new port with a specific profile
+    pub fn with_profile(position: Vec3, direction: Vec3, up: Vec3, radius: f32, profile: PortProfile) -> Self {
+        Self {
+            position,
+            direction: direction.normalize(),
+            up: up.normalize(),
+            radius,
+            profile,
+        }
+    }
+
+    /// Check if another port can connect to this one (legacy simple check)
     /// Directions should be roughly opposite, positions should match
     pub fn can_connect(&self, other: &Port) -> bool {
-        let position_match = (self.position - other.position).length() < 0.1;
-        let direction_match = self.direction.dot(other.direction) < -0.5; // ~120° tolerance
-        let radius_match = (self.radius - other.radius).abs() < 0.1;
+        self.validate_connection(other).is_ok()
+    }
 
-        position_match && direction_match && radius_match
+    /// Validate if this port (as an exit) can connect to another port (as an entrance).
+    /// Returns Ok(()) if compatible, Err with reason if not.
+    ///
+    /// Connection rules:
+    /// - Tube-to-Tube: Diameters must match
+    /// - HalfPipe-to-HalfPipe: Diameters must match
+    /// - Tube-to-HalfPipe (either direction): Diameters must match (both circular)
+    /// - Tube/HalfPipe-to-FlatFloor: Tube bottom must be at or above floor
+    /// - FlatFloor-to-Tube/HalfPipe: Floor must be at or below tube bottom
+    /// - FlatFloor-to-FlatFloor: Exit floor must be at or above entrance floor
+    /// - Open profile: Accepts anything
+    pub fn validate_connection(&self, other: &Port) -> Result<(), ConnectionError> {
+        const POSITION_TOLERANCE: f32 = 0.5;
+        const DIRECTION_TOLERANCE: f32 = -0.5; // cos(120°)
+        const SIZE_TOLERANCE: f32 = 0.2;
+        const HEIGHT_TOLERANCE: f32 = 0.1;
+
+        // Check position alignment
+        let pos_diff = (self.position - other.position).length();
+        if pos_diff > POSITION_TOLERANCE {
+            return Err(ConnectionError {
+                reason: format!("Positions too far apart: {:.2} units", pos_diff),
+            });
+        }
+
+        // Check direction alignment (should be roughly opposite for exit->entrance)
+        let dir_dot = self.direction.dot(other.direction);
+        if dir_dot > DIRECTION_TOLERANCE {
+            return Err(ConnectionError {
+                reason: format!("Directions not aligned (dot={:.2}, need <{:.2})", dir_dot, DIRECTION_TOLERANCE),
+            });
+        }
+
+        // Open profiles accept anything
+        if matches!(self.profile, PortProfile::Open { .. }) || matches!(other.profile, PortProfile::Open { .. }) {
+            return Ok(());
+        }
+
+        // Profile-specific validation
+        match (&self.profile, &other.profile) {
+            // Circular-to-Circular (Tube/HalfPipe combinations): diameters must match
+            (PortProfile::Tube { diameter: d1 }, PortProfile::Tube { diameter: d2 })
+            | (PortProfile::Tube { diameter: d1 }, PortProfile::HalfPipe { diameter: d2 })
+            | (PortProfile::HalfPipe { diameter: d1 }, PortProfile::Tube { diameter: d2 })
+            | (PortProfile::HalfPipe { diameter: d1 }, PortProfile::HalfPipe { diameter: d2 }) => {
+                if (d1 - d2).abs() > SIZE_TOLERANCE {
+                    return Err(ConnectionError {
+                        reason: format!("Diameter mismatch: {:.2} vs {:.2}", d1, d2),
+                    });
+                }
+            }
+
+            // Circular-to-FlatFloor: tube bottom must be at or above floor
+            (PortProfile::Tube { diameter } | PortProfile::HalfPipe { diameter }, PortProfile::FlatFloor { floor_y, .. }) => {
+                let tube_bottom_y = self.position.y - diameter / 2.0;
+                if tube_bottom_y < *floor_y - HEIGHT_TOLERANCE {
+                    return Err(ConnectionError {
+                        reason: format!(
+                            "Tube bottom ({:.2}) below flat floor ({:.2})",
+                            tube_bottom_y, floor_y
+                        ),
+                    });
+                }
+            }
+
+            // FlatFloor-to-Circular: floor must be at or below tube bottom
+            (PortProfile::FlatFloor { floor_y, .. }, PortProfile::Tube { diameter } | PortProfile::HalfPipe { diameter }) => {
+                let tube_bottom_y = other.position.y - diameter / 2.0;
+                if *floor_y > tube_bottom_y + HEIGHT_TOLERANCE {
+                    return Err(ConnectionError {
+                        reason: format!(
+                            "Flat floor ({:.2}) above tube bottom ({:.2})",
+                            floor_y, tube_bottom_y
+                        ),
+                    });
+                }
+            }
+
+            // FlatFloor-to-FlatFloor: exit floor >= entrance floor (descending or level)
+            (PortProfile::FlatFloor { floor_y: exit_y, width: w1 }, PortProfile::FlatFloor { floor_y: entry_y, width: w2 }) => {
+                // Width should be similar
+                if (w1 - w2).abs() > SIZE_TOLERANCE {
+                    return Err(ConnectionError {
+                        reason: format!("Width mismatch: {:.2} vs {:.2}", w1, w2),
+                    });
+                }
+                // Exit floor should be at or above entrance floor
+                if *exit_y < *entry_y - HEIGHT_TOLERANCE {
+                    return Err(ConnectionError {
+                        reason: format!(
+                            "Floor height mismatch: exit {:.2} below entrance {:.2}",
+                            exit_y, entry_y
+                        ),
+                    });
+                }
+            }
+
+            // Open to anything (already handled above, but for completeness)
+            (PortProfile::Open { .. }, _) | (_, PortProfile::Open { .. }) => {}
+        }
+
+        Ok(())
+    }
+
+    /// Calculate the Y position of the lowest point of this port's profile
+    pub fn floor_y(&self) -> f32 {
+        match &self.profile {
+            PortProfile::Tube { diameter } => self.position.y - diameter / 2.0,
+            PortProfile::HalfPipe { diameter } => self.position.y - diameter / 2.0,
+            PortProfile::FlatFloor { floor_y, .. } => *floor_y,
+            PortProfile::Open { size } => self.position.y - size / 2.0,
+        }
     }
 
     /// Get the right vector (perpendicular to direction and up)
@@ -57,6 +275,7 @@ impl Default for Port {
             direction: Vec3::NEG_Z,
             up: Vec3::Y,
             radius: 1.0,
+            profile: PortProfile::tube(1.0),
         }
     }
 }
@@ -206,7 +425,13 @@ pub struct Track {
     segments: Vec<Box<dyn Segment>>,
     bounds: AABB,
     smooth_k: f32,
+    /// Y-coordinate below which marbles are considered "fallen" and should be reset.
+    /// Calculated as the lowest point of any segment minus a margin.
+    kill_plane_y: f32,
 }
+
+/// Margin below the lowest segment for the kill plane
+const KILL_PLANE_MARGIN: f32 = 10.0;
 
 impl Track {
     pub fn new() -> Self {
@@ -214,10 +439,11 @@ impl Track {
             segments: Vec::new(),
             bounds: AABB::default(),
             smooth_k: 0.0, // No blending - segments connect seamlessly via overlap
+            kill_plane_y: -50.0, // Default fallback
         }
     }
 
-    /// Add a segment to the track
+    /// Add a segment to the track without validation
     pub fn add_segment(&mut self, segment: Box<dyn Segment>) {
         let seg_bounds = segment.bounds();
         if self.segments.is_empty() {
@@ -226,6 +452,42 @@ impl Track {
             self.bounds = self.bounds.union(&seg_bounds);
         }
         self.segments.push(segment);
+        self.update_kill_plane();
+    }
+
+    /// Update the kill plane based on current bounds
+    fn update_kill_plane(&mut self) {
+        if self.bounds.min.y < f32::MAX * 0.5 {
+            self.kill_plane_y = self.bounds.min.y - KILL_PLANE_MARGIN;
+        }
+    }
+
+    /// Get the kill plane Y coordinate (marbles below this should be reset)
+    pub fn kill_plane_y(&self) -> f32 {
+        self.kill_plane_y
+    }
+
+    /// Validate if a segment can be added to the track.
+    /// Returns Ok(()) if valid, Err with reason if not.
+    pub fn validate_segment(&self, segment: &dyn Segment) -> Result<(), ConnectionError> {
+        // First segment always valid
+        if self.segments.is_empty() {
+            return Ok(());
+        }
+
+        // Get the last segment's exit port and new segment's entry port
+        let exit_port = self.segments.last().unwrap().primary_exit_port();
+        let entry_port = segment.entry_port();
+
+        // Validate connection
+        exit_port.validate_connection(&entry_port)
+    }
+
+    /// Add a segment with validation. Returns Err if the segment cannot connect.
+    pub fn try_add_segment(&mut self, segment: Box<dyn Segment>) -> Result<(), ConnectionError> {
+        self.validate_segment(segment.as_ref())?;
+        self.add_segment(segment);
+        Ok(())
     }
 
     /// Remove the last segment
@@ -245,6 +507,7 @@ impl Track {
                 self.bounds = self.bounds.union(&seg.bounds());
             }
         }
+        self.update_kill_plane();
     }
 
     /// Get the exit port of the last segment (for connecting new segments)

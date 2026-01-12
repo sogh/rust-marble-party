@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::track::{Port, AABB, Segment};
+use crate::track::{Port, PortProfile, AABB, Segment};
 
 /// A wide starting platform where marbles line up horizontally for a fair start.
 /// Features:
@@ -67,11 +67,24 @@ impl StartingGate {
 
         let exit_dir = (exit_pos - entry_port.position).normalize();
 
-        let exit = Port::new(
+        // Create entry with FlatFloor profile
+        let entry_floor_y = entry_port.position.y;
+        let entry_with_profile = Port::with_profile(
+            entry_port.position,
+            entry_port.direction,
+            entry_port.up,
+            width / 2.0,
+            PortProfile::flat_floor(width, entry_floor_y),
+        );
+
+        // Create exit with FlatFloor profile
+        let exit_floor_y = exit_pos.y;
+        let exit = Port::with_profile(
             exit_pos,
             exit_dir,
             Vec3::Y,
             width / 2.0,
+            PortProfile::flat_floor(width, exit_floor_y),
         );
 
         // Calculate corners
@@ -105,7 +118,7 @@ impl StartingGate {
             length,
             wall_height,
             slope_angle,
-            entry: entry_port,
+            entry: entry_with_profile,
             exit,
             bounds,
             corners,
@@ -126,11 +139,12 @@ impl StartingGate {
         let marble_spacing = marble_radius * 2.0 + 0.1;
         let width = marble_spacing * num_marbles as f32 + 0.2; // Extra margin
 
-        let entry = Port::new(
+        let entry = Port::with_profile(
             entry_pos,
             forward_dir.normalize(),
             Vec3::Y,
             width / 2.0,
+            PortProfile::flat_floor(width, entry_pos.y),
         );
 
         Self::new(width, length, 1.0, slope_angle, entry)

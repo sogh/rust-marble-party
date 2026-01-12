@@ -450,17 +450,19 @@ fn camera_follow(
     }
 }
 
-/// Reset marble if it falls too far
+/// Reset marble if it falls below the track's kill plane
 fn reset_marble(mut query: Query<(&mut Transform, &mut Marble)>, track: Res<Track>) {
+    let kill_y = track.kill_plane_y();
     if let Some(start_port) = track.first_port() {
         for (mut transform, mut marble) in query.iter_mut() {
-            if transform.translation.y < -20.0 {
+            if marble.physics_position.y < kill_y {
                 let pos = start_port.position;
                 transform.translation = pos;
                 marble.velocity = Vec3::ZERO;
                 marble.current_segment = 0;
                 marble.previous_position = pos;
                 marble.physics_position = pos;
+                info!("Marble reset (fell below kill plane at y={:.1})", kill_y);
             }
         }
     }
@@ -517,14 +519,14 @@ fn restart_on_keypress(
     }
 }
 
-/// G - Generate new procedural track
+/// N - Generate new procedural track
 fn procedural_generation_controls(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut track: ResMut<Track>,
     mut marble_query: Query<(&mut Transform, &mut Marble)>,
     mut seed_counter: Local<u64>,
 ) {
-    if keyboard.just_pressed(KeyCode::KeyG) {
+    if keyboard.just_pressed(KeyCode::KeyN) {
         // Increment seed for variety
         *seed_counter += 1;
 
@@ -755,7 +757,7 @@ fn update_debug_ui(
          FPS: {:.0}\n\
          Physics Speed: {:.2}x\n\
          Segments: {}\n\
-         Controls: [/] speed, R restart, B build, G generate{}{}",
+         Controls: [/] speed, R restart, B build, G gizmos, N new track{}{}",
         fps,
         time_scale.0,
         track.segment_count(),

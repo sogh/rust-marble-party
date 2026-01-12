@@ -4,7 +4,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use super::{
-    Port, Segment, Track,
+    Port, PortProfile, Segment, Track,
     StraightTube, CurvedTube, FlatSlope,
     NarrowingTube, WideningTube, HalfPipe, SpiralTube,
     StartingGate, Funnel,
@@ -280,77 +280,220 @@ impl TrackGenerator {
         (track, spawn_positions)
     }
 
-    /// Generate the next segment based on current track state
+    /// Generate the next segment based on current track state.
+    /// Uses profile-aware selection to ensure valid connections.
     pub fn generate_next(&mut self, track: &Track) -> Option<Box<dyn Segment>> {
         let exit_port = track.last_port()?;
 
-        // Select segment type
-        let mut segment_type = self.config.segment_weights.select(&mut self.rng);
+        // Determine which segment types are valid for this exit profile
+        let valid_types = self.get_valid_segment_types(&exit_port);
 
-        // Avoid widening if already at max radius
-        if segment_type == SegmentType::Widening && self.current_radius >= self.config.tube_radius {
-            segment_type = SegmentType::Straight;
+        if valid_types.is_empty() {
+            // Fallback: always allow straight tube with matching profile
+            return Some(Box::new(StraightTube::new(
+                self.config.min_length,
+                self.current_radius,
+                exit_port,
+            )));
         }
 
-        // Avoid narrowing if already at min radius
-        if segment_type == SegmentType::Narrowing && self.current_radius <= self.config.tube_radius * 0.7 {
-            segment_type = SegmentType::Straight;
-        }
+        // Select from valid types using weights
+        let segment_type = self.select_weighted_from(&valid_types);
 
         // Generate length variation
         let length = self.rng.gen_range(self.config.min_length..self.config.max_length);
 
         let segment: Box<dyn Segment> = match segment_type {
             SegmentType::Straight => {
-                Box::new(StraightTube::new(length, self.current_radius, exit_port))
+                Box::new(StraightTube::new(length, self.current_radius, exit_port.clone()))
             }
 
             SegmentType::CurvedLeft => {
                 let angle = self.rng.gen_range(0.3..self.config.max_turn_angle);
                 let arc_radius = self.rng.gen_range(3.0..8.0);
-                Box::new(CurvedTube::new(angle, arc_radius, self.current_radius, exit_port))
+                Box::new(CurvedTube::new(angle, arc_radius, self.current_radius, exit_port.clone()))
             }
 
             SegmentType::CurvedRight => {
                 let angle = self.rng.gen_range(0.3..self.config.max_turn_angle);
                 let arc_radius = self.rng.gen_range(3.0..8.0);
-                Box::new(CurvedTube::new(-angle, arc_radius, self.current_radius, exit_port))
+                Box::new(CurvedTube::new(-angle, arc_radius, self.current_radius, exit_port.clone()))
             }
 
             SegmentType::Spiral => {
                 let turns = self.rng.gen_range(0.5..1.5);
                 let height = self.rng.gen_range(5.0..12.0);
                 let radius = self.rng.gen_range(3.0..6.0);
-                Box::new(SpiralTube::new(turns, height, radius, self.current_radius, exit_port))
+                Box::new(SpiralTube::new(turns, height, radius, self.current_radius, exit_port.clone()))
             }
 
             SegmentType::FlatSlope => {
+                // FlatSlope must have floor at or below the exit's floor level
                 let width = self.rng.gen_range(2.0..4.0);
                 let wall_height = self.rng.gen_range(0.5..1.5);
                 let slope_angle = self.rng.gen_range(0.15..0.4);
-                Box::new(FlatSlope::new(length, width, wall_height, slope_angle, exit_port))
+
+                // Adjust entry port to have floor at correct height
+                let floor_y = exit_port.floor_y();
+                let adjusted_port = Port::with_profile(
+                    exit_port.position,
+                    exit_port.direction,
+                    exit_port.up,
+                    width / 2.0,
+                    PortProfile::flat_floor(width, floor_y),
+                );
+
+                Box::new(FlatSlope::new(length, width, wall_height, slope_angle, adjusted_port))
             }
 
             SegmentType::Narrowing => {
                 let new_radius = self.current_radius * 0.85;
-                let segment = NarrowingTube::new(length, self.current_radius, new_radius, exit_port);
+                let segment = NarrowingTube::new(length, self.current_radius, new_radius, exit_port.clone());
                 self.current_radius = new_radius;
                 Box::new(segment)
             }
 
             SegmentType::Widening => {
                 let new_radius = (self.current_radius * 1.15).min(self.config.tube_radius);
-                let segment = WideningTube::new(length, self.current_radius, new_radius, exit_port);
+                let segment = WideningTube::new(length, self.current_radius, new_radius, exit_port.clone());
                 self.current_radius = new_radius;
                 Box::new(segment)
             }
 
             SegmentType::HalfPipe => {
-                Box::new(HalfPipe::new(length, self.current_radius * 1.5, exit_port))
+                Box::new(HalfPipe::new(length, self.current_radius * 1.5, exit_port.clone()))
             }
         };
 
+        // Validate the segment can connect (extra safety check)
+        if let Err(e) = track.validate_segment(segment.as_ref()) {
+            // Log warning and try a fallback
+            eprintln!("Warning: Generated invalid segment ({}), falling back to straight tube", e);
+            return Some(Box::new(StraightTube::new(length, self.current_radius, exit_port)));
+        }
+
         Some(segment)
+    }
+
+    /// Get segment types that are valid for the given exit port profile
+    fn get_valid_segment_types(&self, exit_port: &Port) -> Vec<SegmentType> {
+        let mut valid = Vec::new();
+
+        match &exit_port.profile {
+            // Tube exits can connect to: tubes, half-pipes, and flat floors (if tube is above floor)
+            PortProfile::Tube { diameter } => {
+                // Tube-compatible segments
+                valid.push(SegmentType::Straight);
+                valid.push(SegmentType::CurvedLeft);
+                valid.push(SegmentType::CurvedRight);
+                valid.push(SegmentType::Spiral);
+
+                // Narrowing/widening based on current radius
+                if self.current_radius > self.config.tube_radius * 0.7 {
+                    valid.push(SegmentType::Narrowing);
+                }
+                if self.current_radius < self.config.tube_radius {
+                    valid.push(SegmentType::Widening);
+                }
+
+                // HalfPipe with matching diameter
+                valid.push(SegmentType::HalfPipe);
+
+                // FlatSlope - tube bottom must be at or above the flat floor
+                // Since we can position the flat floor at the tube bottom, this is always valid
+                valid.push(SegmentType::FlatSlope);
+            }
+
+            // HalfPipe exits - similar to tube
+            PortProfile::HalfPipe { diameter } => {
+                valid.push(SegmentType::Straight);
+                valid.push(SegmentType::CurvedLeft);
+                valid.push(SegmentType::CurvedRight);
+                valid.push(SegmentType::Spiral);
+                valid.push(SegmentType::HalfPipe);
+
+                if self.current_radius > self.config.tube_radius * 0.7 {
+                    valid.push(SegmentType::Narrowing);
+                }
+                if self.current_radius < self.config.tube_radius {
+                    valid.push(SegmentType::Widening);
+                }
+
+                // FlatSlope works if floor is at or below half-pipe bottom
+                valid.push(SegmentType::FlatSlope);
+            }
+
+            // FlatFloor exits - can connect to flat floors or tubes (if tube is at/below floor level)
+            PortProfile::FlatFloor { width, floor_y } => {
+                // FlatSlope to FlatSlope (descending or level)
+                valid.push(SegmentType::FlatSlope);
+
+                // Can transition to tubes if the floor is at/above tube bottom
+                // This is typically achieved by the tube being positioned with its
+                // center at floor_y + radius
+                valid.push(SegmentType::Straight);
+                valid.push(SegmentType::CurvedLeft);
+                valid.push(SegmentType::CurvedRight);
+                valid.push(SegmentType::HalfPipe);
+            }
+
+            // Open profiles accept anything
+            PortProfile::Open { .. } => {
+                valid.push(SegmentType::Straight);
+                valid.push(SegmentType::CurvedLeft);
+                valid.push(SegmentType::CurvedRight);
+                valid.push(SegmentType::Spiral);
+                valid.push(SegmentType::FlatSlope);
+                valid.push(SegmentType::HalfPipe);
+
+                if self.current_radius > self.config.tube_radius * 0.7 {
+                    valid.push(SegmentType::Narrowing);
+                }
+                if self.current_radius < self.config.tube_radius {
+                    valid.push(SegmentType::Widening);
+                }
+            }
+        }
+
+        valid
+    }
+
+    /// Select a segment type from the valid list using configured weights
+    fn select_weighted_from(&mut self, valid_types: &[SegmentType]) -> SegmentType {
+        // Calculate total weight for valid types only
+        let mut total_weight = 0.0;
+        for t in valid_types {
+            total_weight += self.weight_for(*t);
+        }
+
+        if total_weight <= 0.0 {
+            return valid_types[0];
+        }
+
+        // Weighted selection
+        let mut value = self.rng.r#gen::<f32>() * total_weight;
+        for t in valid_types {
+            value -= self.weight_for(*t);
+            if value < 0.0 {
+                return *t;
+            }
+        }
+
+        valid_types[valid_types.len() - 1]
+    }
+
+    /// Get the weight for a segment type
+    fn weight_for(&self, segment_type: SegmentType) -> f32 {
+        match segment_type {
+            SegmentType::Straight => self.config.segment_weights.straight,
+            SegmentType::CurvedLeft => self.config.segment_weights.curved_left,
+            SegmentType::CurvedRight => self.config.segment_weights.curved_right,
+            SegmentType::Spiral => self.config.segment_weights.spiral,
+            SegmentType::FlatSlope => self.config.segment_weights.flat_slope,
+            SegmentType::Narrowing => self.config.segment_weights.narrowing,
+            SegmentType::Widening => self.config.segment_weights.widening,
+            SegmentType::HalfPipe => self.config.segment_weights.half_pipe,
+        }
     }
 
     /// Reset the generator with a new seed

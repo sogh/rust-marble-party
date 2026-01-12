@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::track::{Port, AABB, Segment};
+use crate::track::{Port, PortProfile, AABB, Segment};
 
 /// A flat angled slope with side walls (like a trough or gutter)
 pub struct FlatSlope {
@@ -64,11 +64,25 @@ impl FlatSlope {
         // Exit direction follows the slope (not the entry direction)
         let exit_dir = (exit_pos - entry_port.position).normalize();
 
-        let exit = Port::new(
+        // Create ports with FlatFloor profiles
+        // The floor_y is the actual Y coordinate of the floor at each end
+        let entry_floor_y = entry_port.position.y;
+        let exit_floor_y = exit_pos.y;
+
+        let entry_with_profile = Port::with_profile(
+            entry_port.position,
+            entry_port.direction,
+            entry_port.up,
+            width / 2.0,
+            PortProfile::flat_floor(width, entry_floor_y),
+        );
+
+        let exit = Port::with_profile(
             exit_pos,
             exit_dir,
             entry_port.up,
             width / 2.0, // Use half-width as "radius" equivalent
+            PortProfile::flat_floor(width, exit_floor_y),
         );
 
         // Calculate corners
@@ -102,7 +116,7 @@ impl FlatSlope {
             width,
             wall_height,
             slope_angle,
-            entry: entry_port,
+            entry: entry_with_profile,
             exit,
             bounds,
             corners,
@@ -111,11 +125,13 @@ impl FlatSlope {
 
     /// Create a slope at origin going in -Z direction
     pub fn at_origin(length: f32, width: f32, wall_height: f32, slope_angle: f32) -> Self {
-        let entry = Port::new(
-            Vec3::new(0.0, length * slope_angle.sin(), 0.0),
+        let entry_y = length * slope_angle.sin();
+        let entry = Port::with_profile(
+            Vec3::new(0.0, entry_y, 0.0),
             Vec3::NEG_Z,
             Vec3::Y,
             width / 2.0,
+            PortProfile::flat_floor(width, entry_y),
         );
         Self::new(length, width, wall_height, slope_angle, entry)
     }

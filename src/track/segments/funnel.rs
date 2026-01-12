@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::track::{Port, AABB, Segment};
+use crate::track::{Port, PortProfile, AABB, Segment};
 
 /// A funnel that collects marbles from a wide opening to a narrow exit
 /// The funnel has angled walls that guide marbles toward the center
@@ -24,11 +24,23 @@ impl Funnel {
     pub fn new(depth: f32, top_radius: f32, bottom_radius: f32, entry_port: Port) -> Self {
         // Funnel goes downward from entry
         let exit_pos = entry_port.position - Vec3::Y * depth;
-        let exit = Port::new(
+
+        // Entry uses Open profile - accepts marbles from any source
+        let entry_with_profile = Port::with_profile(
+            entry_port.position,
+            entry_port.direction,
+            entry_port.up,
+            top_radius,
+            PortProfile::open(top_radius * 2.0),
+        );
+
+        // Exit uses Tube profile - marbles exit into a tube
+        let exit = Port::with_profile(
             exit_pos,
             Vec3::NEG_Y, // Exit pointing down
             Vec3::NEG_Z, // Arbitrary up for vertical exit
             bottom_radius,
+            PortProfile::tube(bottom_radius),
         );
 
         let bounds = AABB::from_points(
@@ -46,7 +58,7 @@ impl Funnel {
             top_radius,
             bottom_radius,
             wall_thickness: 0.2,
-            entry: entry_port,
+            entry: entry_with_profile,
             exit,
             bounds,
         }
@@ -54,11 +66,12 @@ impl Funnel {
 
     /// Create a funnel at origin
     pub fn at_origin(depth: f32, top_radius: f32, bottom_radius: f32) -> Self {
-        let entry = Port::new(
+        let entry = Port::with_profile(
             Vec3::new(0.0, depth, 0.0),
             Vec3::NEG_Y, // Entry pointing down into funnel
             Vec3::NEG_Z,
             top_radius,
+            PortProfile::open(top_radius * 2.0),
         );
         Self::new(depth, top_radius, bottom_radius, entry)
     }
