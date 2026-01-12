@@ -52,13 +52,22 @@ impl StraightTube {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-const OVERLAP_DISTANCE: f32 = 1.0;
+/// Extended to 4.0 to cover the spiral's lead-out region (3.0 units)
+const OVERLAP_DISTANCE: f32 = 4.0;
 
 impl Segment for StraightTube {
     fn sdf(&self, point: Vec3) -> f32 {
-        // Pure infinite cylinder - no axial bounds
-        // This ensures seamless handoff at junctions with curves
-        // The max() in Track::sdf_near_segment will pick the best SDF
+        // Calculate axial position along the tube
+        let to_point = point - self.entry.position;
+        let along = to_point.dot(self.entry.direction);
+        let tube_length = self.length;
+
+        // Reject points outside axial bounds (with small overlap for transitions)
+        if along < -OVERLAP_DISTANCE || along > tube_length + OVERLAP_DISTANCE {
+            return f32::MAX;
+        }
+
+        // Radial distance from tube axis
         let radial_dist = infinite_cylinder_sdf(
             point,
             self.entry.position,

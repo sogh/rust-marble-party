@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::track::{Port, AABB, Segment, infinite_cylinder_sdf, smooth_min};
+use crate::track::{Port, AABB, Segment};
 
 /// A helical tube segment that spirals downward
 pub struct SpiralTube {
@@ -68,44 +68,80 @@ impl SpiralTube {
     fn generate_spine(&mut self) {
         self.spine.clear();
 
-        let start_y = self.entry.position.y;
+        // Start from the entry port position
+        let start_pos = self.entry.position;
+        let start_dir = self.entry.direction;
 
-        for i in 0..=self.segments {
+        // Get horizontal entry direction
+        let forward = Vec3::new(start_dir.x, 0.0, start_dir.z).normalize_or_zero();
+        let forward = if forward.length_squared() < 0.01 { Vec3::NEG_Z } else { forward };
+
+        // === LEAD-IN: Straight section before spiral for smooth transition ===
+        let lead_in_length = 2.0;
+        let lead_in_end = start_pos + start_dir * lead_in_length;
+        self.spine.push(start_pos);
+        self.spine.push(lead_in_end);
+
+        // For a vertical helix (spiral staircase), the axis is vertical
+        // The helix center is offset from lead-in end so that point is ON the circle
+        // and the tangent matches the forward direction
+
+        // Tangent of circle at angle θ is perpendicular to radius
+        // If we want tangent = forward, radius must be perpendicular to forward
+        let right = forward.cross(Vec3::Y).normalize();
+
+        // Center is to the left of lead-in end (so tangent points forward)
+        let center = Vec3::new(
+            lead_in_end.x - right.x * self.helix_radius,
+            0.0, // Center Y doesn't matter, we track Y separately
+            lead_in_end.z - right.z * self.helix_radius,
+        );
+
+        // Starting angle: from center to lead-in end point
+        let to_spiral_start = Vec2::new(lead_in_end.x - center.x, lead_in_end.z - center.z);
+        let start_angle = to_spiral_start.y.atan2(to_spiral_start.x);
+
+        // Generate spiral points (skip first since lead_in_end is already added)
+        for i in 1..=self.segments {
             let t = i as f32 / self.segments as f32;
-            let angle = t * std::f32::consts::TAU * self.loops;
+            // Clockwise rotation (so tangent at entry points forward)
+            let angle = start_angle - t * std::f32::consts::TAU * self.loops;
 
-            // Spiral with varying radius
-            let radius = self.helix_radius + 1.5 * (angle * 0.5).sin();
-            let x = radius * angle.cos();
-            let z = radius * angle.sin();
+            // Position on the circle in XZ plane
+            let x = center.x + self.helix_radius * angle.cos();
+            let z = center.z + self.helix_radius * angle.sin();
 
-            // Descending with small bumps (cosine so starts going downhill)
-            let base_descent = self.descent * t;
-            let bumps = self.bump_amplitude * (angle * 2.0).cos();
-            let y = start_y - base_descent + bumps;
+            // Y descends smoothly from lead_in_end height
+            let y = lead_in_end.y - self.descent * t;
 
             self.spine.push(Vec3::new(x, y, z));
         }
 
-        // Compute bounds
-        self.bounds = AABB::from_points(&self.spine, self.tube_radius + 0.5);
-
-        // Compute exit port
+        // === COMPUTE EXIT PORT ===
+        // Position exit port directly at the last spiral point so the straight tube
+        // starts exactly where the spiral ends - no gap for the marble to bounce in.
+        //
+        // Use the analytical tangent for direction since it's mathematically correct
+        // for a helix, even though the spine is discrete.
         if self.spine.len() >= 2 {
             let last = self.spine[self.spine.len() - 1];
-            let prev = self.spine[self.spine.len() - 2];
-            let dir = (last - prev).normalize();
 
-            self.exit = Port::new(last, dir, Vec3::Y, self.tube_radius);
+            // Analytical tangent at end of spiral
+            let end_angle = start_angle - std::f32::consts::TAU * self.loops;
+            let angular_speed = std::f32::consts::TAU * self.loops;
+            let dx = self.helix_radius * end_angle.sin() * angular_speed;
+            let dz = -self.helix_radius * end_angle.cos() * angular_speed;
+            let dy = -self.descent;
+            let exit_dir = Vec3::new(dx, dy, dz).normalize();
+
+            // Exit port is at the last spiral point - straight tube starts here
+            self.exit = Port::new(last, exit_dir, Vec3::Y, self.tube_radius);
         }
 
-        // Update entry port to match actual spine start
-        if !self.spine.is_empty() {
-            self.entry.position = self.spine[0];
-            if self.spine.len() >= 2 {
-                self.entry.direction = (self.spine[1] - self.spine[0]).normalize();
-            }
-        }
+        // Compute bounds - include the exit position for proper AABB
+        let mut bound_points = self.spine.clone();
+        bound_points.push(self.exit.position);
+        self.bounds = AABB::from_points(&bound_points, self.tube_radius + 0.5);
     }
 
     /// Get the spine points for external use
@@ -123,33 +159,42 @@ impl Segment for SpiralTube {
             return f32::MAX;
         }
 
-        // Find the closest point along the spine and compute radial distance
-        let mut min_dist = f32::MAX;
+        // Reject points far behind the entry to avoid interference with previous segment
+        let to_point_entry = point - self.entry.position;
+        let along_entry = to_point_entry.dot(self.entry.direction);
+        if along_entry < -3.0 {
+            return f32::MAX;
+        }
+
+        // Find distance to closest point on the FINITE spine polyline
+        // (Same approach as CurvedTube - don't use infinite cylinders!)
+        let mut min_dist_sq = f32::MAX;
 
         for i in 0..self.spine.len() - 1 {
             let a = self.spine[i];
             let b = self.spine[i + 1];
-            let segment_dir = (b - a).normalize_or_zero();
+            let ab = b - a;
+            let ab_len_sq = ab.dot(ab);
 
-            // Use infinite cylinder for this segment
-            let cyl_dist = infinite_cylinder_sdf(point, a, segment_dir, self.tube_radius);
-
-            // Check axial bounds within this spine segment
-            let to_point = point - a;
-            let seg_len = (b - a).length();
-            let axial = to_point.dot(segment_dir);
-
-            // Only count if within this spine segment's axial range (no entry/exit caps)
-            if axial >= 0.0 && axial <= seg_len {
-                min_dist = min_dist.min(cyl_dist);
-            } else {
-                // Blend for nearby spine segments
-                min_dist = smooth_min(min_dist, cyl_dist, 0.5);
+            if ab_len_sq < 0.0001 {
+                let dist_sq = (point - a).length_squared();
+                min_dist_sq = min_dist_sq.min(dist_sq);
+                continue;
             }
+
+            let ap = point - a;
+            // Clamp t to [0,1] so each segment is FINITE
+            let t = (ap.dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+            let closest_point = a + ab * t;
+            let dist_sq = (point - closest_point).length_squared();
+
+            min_dist_sq = min_dist_sq.min(dist_sq);
         }
 
-        // Negate so collision is on INSIDE of tube
-        -min_dist
+        // SDF = tube_radius - distance_to_spine
+        // Positive = inside tube (free space), Negative = in wall
+        let dist_to_spine = min_dist_sq.sqrt();
+        -(dist_to_spine - self.tube_radius)
     }
 
     fn is_in_core_region(&self, point: Vec3) -> bool {
@@ -209,19 +254,18 @@ impl Segment for SpiralTube {
             gizmos.line(self.spine[i], self.spine[i + 1], color);
         }
 
-        // Draw extended capsule endpoints (overlap regions)
+        // Draw transition zone from last spiral point to exit (handled by straight tube)
         if !self.spine.is_empty() {
             let extended_entry = self.spine[0] - self.entry.direction * OVERLAP_DISTANCE;
             let last_idx = self.spine.len() - 1;
-            let extended_exit = self.spine[last_idx] + self.exit.direction * OVERLAP_DISTANCE;
 
-            // Draw extended lines in yellow
+            // Draw extended entry line in yellow
             gizmos.line(extended_entry, self.spine[0], Color::srgb(1.0, 1.0, 0.0));
-            gizmos.line(self.spine[last_idx], extended_exit, Color::srgb(1.0, 1.0, 0.0));
-
-            // Draw spheres at extended endpoints
             gizmos.sphere(Isometry3d::from_translation(extended_entry), self.tube_radius, Color::srgb(1.0, 1.0, 0.0));
-            gizmos.sphere(Isometry3d::from_translation(extended_exit), self.tube_radius, Color::srgb(1.0, 0.5, 0.0));
+
+            // Draw transition zone to exit in orange (this region is handled by straight tube)
+            gizmos.line(self.spine[last_idx], self.exit.position, Color::srgb(1.0, 0.5, 0.0));
+            gizmos.sphere(Isometry3d::from_translation(self.exit.position), self.tube_radius, Color::srgb(1.0, 0.5, 0.0));
         }
 
         // Draw cross-section circles every few points
@@ -261,5 +305,53 @@ impl Segment for SpiralTube {
 
     fn descent(&self) -> f32 {
         self.descent
+    }
+
+    /// Analytic gradient for smooth physics
+    /// Points radially inward from the tube surface (since SDF is negated)
+    fn sdf_gradient(&self, point: Vec3) -> Vec3 {
+        if self.spine.len() < 2 {
+            return Vec3::Y;
+        }
+
+        // Find the closest point on the spine (same algorithm as SDF)
+        let mut min_dist_sq = f32::MAX;
+        let mut closest_point = self.spine[0];
+
+        for i in 0..self.spine.len() - 1 {
+            let a = self.spine[i];
+            let b = self.spine[i + 1];
+            let ab = b - a;
+            let ab_len_sq = ab.dot(ab);
+
+            if ab_len_sq < 0.0001 {
+                let dist_sq = (point - a).length_squared();
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
+                    closest_point = a;
+                }
+                continue;
+            }
+
+            let ap = point - a;
+            let t = (ap.dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+            let cp = a + ab * t;
+            let dist_sq = (point - cp).length_squared();
+
+            if dist_sq < min_dist_sq {
+                min_dist_sq = dist_sq;
+                closest_point = cp;
+            }
+        }
+
+        // Gradient points from marble toward spine center (inward for SDF convention)
+        // Our SDF is negative when outside, so gradient should point inward
+        let radial_dir = closest_point - point;
+        if radial_dir.length_squared() < 0.0001 {
+            // Point is on the spine - use up vector as fallback
+            return Vec3::Y;
+        }
+
+        radial_dir.normalize()
     }
 }
