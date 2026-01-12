@@ -70,7 +70,7 @@ impl Funnel {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-const OVERLAP_DISTANCE: f32 = 1.0;
+const OVERLAP_DISTANCE: f32 = 2.0;
 
 impl Segment for Funnel {
     fn sdf(&self, point: Vec3) -> f32 {
@@ -177,5 +177,37 @@ impl Segment for Funnel {
 
     fn type_name(&self) -> &'static str {
         "Funnel"
+    }
+
+    fn sdf_gradient(&self, point: Vec3) -> Vec3 {
+        let top_y = self.entry.position.y;
+        let bottom_y = self.exit.position.y;
+        let center_xz = Vec3::new(self.entry.position.x, 0.0, self.entry.position.z);
+
+        // Height within funnel (0 at bottom, 1 at top)
+        let t = ((point.y - bottom_y) / self.depth).clamp(0.0, 1.0);
+
+        // Horizontal distance from center axis
+        let point_xz = Vec3::new(point.x, 0.0, point.z);
+        let radial_vec = point_xz - center_xz;
+        let radial_dist = radial_vec.length();
+
+        if radial_dist < 0.0001 {
+            // Point is on the axis - gradient points up toward wider part
+            return Vec3::Y;
+        }
+
+        // For a cone, the gradient points inward and slightly up/down
+        // depending on position relative to the cone surface
+        let radial_dir = radial_vec / radial_dist;
+
+        // Cone slope: for every unit of height change, radius changes by
+        let slope = (self.top_radius - self.bottom_radius) / self.depth;
+
+        // Normal to cone surface points inward radially and has vertical component
+        // based on the slope. For a widening-upward cone, normal tilts upward.
+        let gradient = -radial_dir + Vec3::Y * slope;
+
+        gradient.normalize_or_zero()
     }
 }
