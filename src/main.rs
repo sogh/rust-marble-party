@@ -131,75 +131,17 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Create track: starting gate -> funnel -> straight tube
-    let mut track = Track::new();
-
-    // Starting gate - wide platform for 8 marbles to line up horizontally
+    // Generate procedural track with starting gate
     let num_marbles = 8;
+    let config = GeneratorConfig {
+        num_marbles,
+        marble_radius: MARBLE_RADIUS,
+        tube_radius: TRACK_RADIUS,
+        ..Default::default()
+    };
 
-    // Gate width for 8 marbles
-    let marble_spacing = MARBLE_RADIUS * 2.0 + 0.1;
-    let gate_width = marble_spacing * num_marbles as f32 + 0.2;
-
-    // TRACK LAYOUT with Starting Gate
-    // Starting gate is a flat platform above the funnel
-    // Marbles spawn in a row, roll forward, and drop into funnel
-    //
-    let funnel_top_y = 12.0;
-    let funnel_top_radius = gate_width / 2.0;
-    let funnel_entry = Port::new(
-        Vec3::new(0.0, funnel_top_y, 0.0),
-        Vec3::NEG_Y,
-        Vec3::NEG_Z,
-        funnel_top_radius,
-    );
-    let funnel = Funnel::new(
-        5.0,
-        funnel_top_radius,
-        TRACK_RADIUS,
-        funnel_entry,
-    );
-    let funnel_exit = funnel.exit_ports()[0].clone();
-
-    // Starting gate - positioned so marbles drop directly into funnel
-    // Gate exit is at the funnel's top level so marbles fall in immediately
-    let gate_exit_y = funnel_top_y + 0.5;  // Exit just above funnel opening
-    let gate_length = 3.5;
-    let gate_slope: f32 = 0.25;  // Steeper slope = more downward velocity at exit
-
-    // Gate slopes DOWN toward funnel - entry is higher and back
-    let gate_entry_y = gate_exit_y + gate_length * gate_slope.sin();
-    let gate_entry_z = gate_length * gate_slope.cos();
-
-    let gate_entry = Port::new(
-        Vec3::new(0.0, gate_entry_y, gate_entry_z),
-        Vec3::NEG_Z,  // Forward direction
-        Vec3::Y,
-        gate_width / 2.0,
-    );
-    let starting_gate = StartingGate::new(
-        gate_width,
-        gate_length,
-        1.0,  // Wall height
-        gate_slope,
-        gate_entry,
-    );
-
-    // Get spawn positions from the gate
-    let spawn_positions = starting_gate.get_spawn_positions(num_marbles, MARBLE_RADIUS);
-
-    // Add segments: gate first (segment 0), then funnel, tube, etc.
-    track.add_segment(Box::new(starting_gate));
-    track.add_segment(Box::new(funnel));
-
-    // Exit tube - longer to give more track
-    let exit_tube = StraightTube::new(15.0, TRACK_RADIUS, funnel_exit);
-    let tube_exit = exit_tube.exit_ports()[0].clone();
-    track.add_segment(Box::new(exit_tube));
-
-    // Add a widening section at the bottom so marbles spread out
-    let widener = WideningTube::new(5.0, TRACK_RADIUS, TRACK_RADIUS * 2.0, tube_exit);
-    track.add_segment(Box::new(widener));
+    let mut generator = TrackGenerator::new(config);
+    let (track, spawn_positions) = generator.generate_with_spawns(10); // 10 segments total
 
     commands.insert_resource(track);
 

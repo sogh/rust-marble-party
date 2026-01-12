@@ -7,6 +7,7 @@ use super::{
     Port, Segment, Track,
     StraightTube, CurvedTube, FlatSlope,
     NarrowingTube, WideningTube, HalfPipe, SpiralTube,
+    StartingGate, Funnel,
 };
 
 /// Configuration for procedural track generation
@@ -14,6 +15,10 @@ use super::{
 pub struct GeneratorConfig {
     /// Random seed for reproducibility
     pub seed: u64,
+    /// Number of marbles (determines starting gate width)
+    pub num_marbles: usize,
+    /// Marble radius
+    pub marble_radius: f32,
     /// Minimum segment length
     pub min_length: f32,
     /// Maximum segment length
@@ -32,6 +37,8 @@ impl Default for GeneratorConfig {
     fn default() -> Self {
         Self {
             seed: 42,
+            num_marbles: 8,
+            marble_radius: 0.2,
             min_length: 4.0,
             max_length: 12.0,
             tube_radius: 1.0,
@@ -146,24 +153,82 @@ impl TrackGenerator {
     pub fn generate(&mut self, num_segments: usize) -> Track {
         let mut track = Track::new();
 
-        // Start with a straight tube angled downward
-        let start_entry = Port::new(
-            Vec3::new(0.0, 10.0, 0.0),
-            Vec3::new(0.2, -0.3, 0.93).normalize(),
-            Vec3::Y,
-            self.config.tube_radius,
-        );
-        let straight = StraightTube::new(12.0, self.config.tube_radius, start_entry);
-        track.add_segment(Box::new(straight));
+        // Calculate gate dimensions based on marble count
+        let marble_spacing = self.config.marble_radius * 2.0 + 0.1;
+        let gate_width = marble_spacing * self.config.num_marbles as f32 + 0.2;
+        let gate_length = 3.5;
+        let gate_slope: f32 = 0.25; // Radians
 
+        // Funnel dimensions - top matches gate width
+        let funnel_depth = 10.0;
+        let funnel_top_radius = gate_width / 2.0;
+        let funnel_bottom_radius = self.config.tube_radius;
+        let funnel_top_y = 12.0;
+
+        // Starting gate positioned above funnel
+        let gate_exit_y = funnel_top_y + 0.5;
+        let gate_entry_y = gate_exit_y + gate_length * gate_slope.sin();
+        let gate_entry_z = gate_length * gate_slope.cos();
+
+        let gate_entry = Port::new(
+            Vec3::new(0.0, gate_entry_y, gate_entry_z),
+            Vec3::NEG_Z,
+            Vec3::Y,
+            gate_width / 2.0,
+        );
+        let starting_gate = StartingGate::new(gate_width, gate_length, 1.0, gate_slope, gate_entry);
+        track.add_segment(Box::new(starting_gate));
+
+        // Funnel to collect marbles
+        let funnel_entry = Port::new(
+            Vec3::new(0.0, funnel_top_y, 0.0),
+            Vec3::NEG_Y,
+            Vec3::NEG_Z,
+            funnel_top_radius,
+        );
+        let funnel = Funnel::new(funnel_depth, funnel_top_radius, funnel_bottom_radius, funnel_entry);
+        track.add_segment(Box::new(funnel));
+
+        // Continue from funnel exit (pointing down)
         // Generate remaining segments
-        for _ in 1..num_segments {
+        for _ in 2..num_segments {
             if let Some(segment) = self.generate_next(&track) {
                 track.add_segment(segment);
             }
         }
 
         track
+    }
+
+    /// Generate a track and return spawn positions for marbles
+    /// This creates the track and calculates where marbles should spawn on the starting gate
+    pub fn generate_with_spawns(&mut self, num_segments: usize) -> (Track, Vec<Vec3>) {
+        // Calculate gate dimensions (same as in generate)
+        let marble_spacing = self.config.marble_radius * 2.0 + 0.1;
+        let gate_width = marble_spacing * self.config.num_marbles as f32 + 0.2;
+        let gate_length = 3.5;
+        let gate_slope: f32 = 0.25;
+
+        let funnel_top_y = 12.0;
+        let gate_exit_y = funnel_top_y + 0.5;
+        let gate_entry_y = gate_exit_y + gate_length * gate_slope.sin();
+        let gate_entry_z = gate_length * gate_slope.cos();
+
+        let gate_entry = Port::new(
+            Vec3::new(0.0, gate_entry_y, gate_entry_z),
+            Vec3::NEG_Z,
+            Vec3::Y,
+            gate_width / 2.0,
+        );
+
+        // Create starting gate to get spawn positions
+        let starting_gate = StartingGate::new(gate_width, gate_length, 1.0, gate_slope, gate_entry);
+        let spawn_positions = starting_gate.get_spawn_positions(self.config.num_marbles, self.config.marble_radius);
+
+        // Generate the full track
+        let track = self.generate(num_segments);
+
+        (track, spawn_positions)
     }
 
     /// Generate the next segment based on current track state
