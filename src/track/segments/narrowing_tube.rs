@@ -86,7 +86,15 @@ impl Segment for NarrowingTube {
 
         // Distance from axis (radial distance with interpolated radius)
         let on_axis = self.entry.position + axis_dir * along.clamp(0.0, axis_length);
-        let radial_dist = (point - on_axis).length() - radius;
+        let dist_from_axis = (point - on_axis).length();
+        let radial_dist = dist_from_axis - radius;
+
+        // Only claim points that are within or near the tube
+        // Points far outside should not be claimed by this segment
+        let max_claim_distance = radius * 2.0;
+        if radial_dist > max_claim_distance {
+            return f32::MAX;
+        }
 
         -radial_dist
     }

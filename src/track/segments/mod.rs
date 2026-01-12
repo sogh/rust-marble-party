@@ -8,6 +8,7 @@ mod funnel;
 mod half_pipe;
 mod bowl;
 mod fork;
+mod starting_gate;
 
 pub use spiral_tube::SpiralTube;
 pub use straight_tube::StraightTube;
@@ -19,3 +20,4 @@ pub use funnel::Funnel;
 pub use half_pipe::HalfPipe;
 pub use bowl::Bowl;
 pub use fork::Fork;
+pub use starting_gate::StartingGate;

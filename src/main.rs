@@ -3,7 +3,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::time::{Fixed, Virtual};
 
 mod track;
-use track::{Track, Port, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, SpiralTube, Segment, TrackGenerator, GeneratorConfig};
+use track::{Track, Port, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, SpiralTube, Funnel, StartingGate, Segment, TrackGenerator, GeneratorConfig};
 
 // ============================================================================
 // CONSTANTS
@@ -131,60 +131,79 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Create track: straight tube -> spiral -> straight tube
+    // Create track: starting gate -> funnel -> straight tube
     let mut track = Track::new();
 
-    // Spiral parameters
-    let helix_radius = 5.0;
-    let spiral_descent = 8.0;
-    let spiral_loops = 1.5;
-    let spiral_start_y = 12.0;
+    // Starting gate - wide platform for 8 marbles to line up horizontally
+    let num_marbles = 8;
 
-    // The spiral starts at (helix_radius, spiral_start_y, 0) going tangent to the circle
-    // First tube should end there, coming from outside the spiral
-    let tube1_length = 8.0;
-    let tube1_start = Vec3::new(helix_radius + tube1_length, spiral_start_y + 1.0, 0.0);
-    let tube1_dir = Vec3::new(-1.0, -0.1, 0.0).normalize(); // Going left and slightly down
+    // Gate width for 8 marbles
+    let marble_spacing = MARBLE_RADIUS * 2.0 + 0.1;
+    let gate_width = marble_spacing * num_marbles as f32 + 0.2;
 
-    let tube1_entry = Port::new(tube1_start, tube1_dir, Vec3::Y, TRACK_RADIUS);
-    let tube1 = StraightTube::new(tube1_length, TRACK_RADIUS, tube1_entry.clone());
-    let tube1_exit = tube1.exit_ports()[0].clone();
-    track.add_segment(Box::new(tube1));
+    // TRACK LAYOUT with Starting Gate
+    // Starting gate is a flat platform above the funnel
+    // Marbles spawn in a row, roll forward, and drop into funnel
+    //
+    let funnel_top_y = 12.0;
+    let funnel_top_radius = gate_width / 2.0;
+    let funnel_entry = Port::new(
+        Vec3::new(0.0, funnel_top_y, 0.0),
+        Vec3::NEG_Y,
+        Vec3::NEG_Z,
+        funnel_top_radius,
+    );
+    let funnel = Funnel::new(
+        5.0,
+        funnel_top_radius,
+        TRACK_RADIUS,
+        funnel_entry,
+    );
+    let funnel_exit = funnel.exit_ports()[0].clone();
 
-    // Spiral tube - starts near where tube1 exits
-    // The spiral generates its own geometry starting at (helix_radius, entry_y, 0)
-    let spiral_entry = Port::new(
-        tube1_exit.position,
-        Vec3::new(0.0, -0.2, 1.0).normalize(), // Tangent to spiral start
+    // Starting gate - positioned so marbles drop directly into funnel
+    // Gate exit is at the funnel's top level so marbles fall in immediately
+    let gate_exit_y = funnel_top_y + 0.5;  // Exit just above funnel opening
+    let gate_length = 3.5;
+    let gate_slope: f32 = 0.25;  // Steeper slope = more downward velocity at exit
+
+    // Gate slopes DOWN toward funnel - entry is higher and back
+    let gate_entry_y = gate_exit_y + gate_length * gate_slope.sin();
+    let gate_entry_z = gate_length * gate_slope.cos();
+
+    let gate_entry = Port::new(
+        Vec3::new(0.0, gate_entry_y, gate_entry_z),
+        Vec3::NEG_Z,  // Forward direction
         Vec3::Y,
-        TRACK_RADIUS,
+        gate_width / 2.0,
     );
-    let spiral = SpiralTube::new(
-        spiral_loops,
-        spiral_descent,
-        helix_radius,
-        TRACK_RADIUS,
-        spiral_entry,
+    let starting_gate = StartingGate::new(
+        gate_width,
+        gate_length,
+        1.0,  // Wall height
+        gate_slope,
+        gate_entry,
     );
-    let spiral_exit = spiral.exit_ports()[0].clone();
-    track.add_segment(Box::new(spiral));
 
-    // Exit tube continues from spiral
-    let exit_tube = StraightTube::new(10.0, TRACK_RADIUS, spiral_exit);
+    // Get spawn positions from the gate
+    let spawn_positions = starting_gate.get_spawn_positions(num_marbles, MARBLE_RADIUS);
+
+    // Add segments: gate first (segment 0), then funnel, tube, etc.
+    track.add_segment(Box::new(starting_gate));
+    track.add_segment(Box::new(funnel));
+
+    // Exit tube - longer to give more track
+    let exit_tube = StraightTube::new(15.0, TRACK_RADIUS, funnel_exit);
+    let tube_exit = exit_tube.exit_ports()[0].clone();
     track.add_segment(Box::new(exit_tube));
 
-    // Store start position for marble spawning
-    let start_entry = tube1_entry.clone();
-
-    // Store start position for marble spawning
-    // Offset down to tube floor so marbles start in contact with surface
-    let tube_floor_offset = Vec3::Y * -(TRACK_RADIUS - MARBLE_RADIUS - 0.01);
-    let marble_start = start_entry.position + tube_floor_offset;
-    let marble_dir = start_entry.direction;
+    // Add a widening section at the bottom so marbles spread out
+    let widener = WideningTube::new(5.0, TRACK_RADIUS, TRACK_RADIUS * 2.0, tube_exit);
+    track.add_segment(Box::new(widener));
 
     commands.insert_resource(track);
 
-    // Spawn 8 marbles with different colors
+    // Spawn 8 marbles with different colors - use positions from starting gate
     let marble_colors = [
         Color::srgb(0.9, 0.1, 0.1), // Red
         Color::srgb(0.1, 0.7, 0.1), // Green
@@ -198,8 +217,7 @@ fn setup(
 
     let mesh = meshes.add(Sphere::new(MARBLE_RADIUS));
     for (i, color) in marble_colors.iter().enumerate() {
-        // Space marbles along tube direction
-        let start_pos = marble_start + marble_dir * (i as f32 * 0.6);
+        let start_pos = spawn_positions[i];
         commands.spawn((
             Mesh3d(mesh.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
@@ -210,7 +228,7 @@ fn setup(
             })),
             Transform::from_translation(start_pos),
             Marble {
-                velocity: Vec3::ZERO,  // Gravity will accelerate on sloped tube
+                velocity: Vec3::ZERO,  // Gravity will accelerate on sloped gate
                 radius: MARBLE_RADIUS,
                 current_segment: 0,
                 previous_segment: 0,
@@ -277,6 +295,11 @@ fn marble_physics(
             red_marble_debug.penetration = penetration.max(0.0);
         }
 
+        // Cap penetration to prevent physics explosions from buggy SDF values
+        // Max penetration is one marble diameter
+        let max_penetration = marble.radius * 2.0;
+        let penetration = penetration.min(max_penetration);
+
         if penetration > 0.0 {
             // Use previous segment's gradient during transition buffer period
             // This prevents the "lip" effect at segment junctions
@@ -304,7 +327,7 @@ fn marble_physics(
                 red_marble_debug.collision_normal = normal;
             }
 
-            // Resolve penetration
+            // Resolve penetration (capped to prevent explosions)
             let corrected_pos = next_pos + normal * penetration;
 
             // Decompose velocity

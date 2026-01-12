@@ -303,9 +303,10 @@ impl Track {
             }
         }
 
-        // If no segment accepted the point, return a large negative (outside all)
+        // If no segment accepted the point, return a large positive (free space, no collision)
+        // This allows marbles to fall freely between segments
         if best_dist == f32::NEG_INFINITY {
-            return -100.0;
+            return 100.0;
         }
 
         best_dist

@@ -75,6 +75,13 @@ impl Segment for StraightTube {
             self.tube_radius,
         );
 
+        // Only claim points that are within or near the tube
+        // Points far outside should not be claimed by this segment
+        let max_claim_distance = self.tube_radius * 2.0;
+        if radial_dist > max_claim_distance {
+            return f32::MAX;
+        }
+
         -radial_dist
     }
 

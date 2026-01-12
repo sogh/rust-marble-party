@@ -70,7 +70,10 @@ impl Funnel {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-const OVERLAP_DISTANCE: f32 = 2.0;
+/// Only extends BELOW - above is handled by previous segment (starting gate)
+const OVERLAP_DISTANCE_BELOW: f32 = 2.0;
+/// Small overlap above for transition from starting gate
+const OVERLAP_DISTANCE_ABOVE: f32 = 0.3;
 
 impl Segment for Funnel {
     fn sdf(&self, point: Vec3) -> f32 {
@@ -78,31 +81,38 @@ impl Segment for Funnel {
         let bottom_y = self.exit.position.y;
         let center_xz = Vec3::new(self.entry.position.x, 0.0, self.entry.position.z);
 
+        // Horizontal distance from center axis
+        let point_xz = Vec3::new(point.x, 0.0, point.z);
+        let radial_dist = (point_xz - center_xz).length();
+
+        // If above the funnel opening - only claim if point is INSIDE the top opening
+        // This allows marbles to roll on the starting gate floor above
+        if point.y > top_y + OVERLAP_DISTANCE_ABOVE {
+            return f32::MAX; // Let starting gate handle this
+        }
+
+        // Small transition zone just above funnel top
+        if point.y > top_y {
+            // Only claim if inside the cylinder projected up
+            if radial_dist < self.top_radius {
+                // Inside the opening - provide collision with cone surface
+                let cone_dist = radial_dist - self.top_radius;
+                return -cone_dist;
+            }
+            return f32::MAX; // Outside opening, let other segment handle
+        }
+
         // Height within funnel (0 at bottom, 1 at top)
         let t = ((point.y - bottom_y) / self.depth).clamp(0.0, 1.0);
 
         // Radius at this height
         let radius = self.radius_at(t);
 
-        // Horizontal distance from center axis
-        let point_xz = Vec3::new(point.x, 0.0, point.z);
-        let radial_dist = (point_xz - center_xz).length();
-
         // Distance to cone surface
         let cone_dist = radial_dist - radius;
 
-        // Distance to top and bottom planes (with overlap)
-        let above_top = point.y - top_y - OVERLAP_DISTANCE;
-        let below_bottom = bottom_y - OVERLAP_DISTANCE - point.y;
-
-        // If above the funnel
-        if above_top > 0.0 {
-            // Hemispherical cap at top
-            let dist_to_rim = ((radial_dist - self.top_radius).max(0.0).powi(2) + above_top.powi(2)).sqrt();
-            return -dist_to_rim.min(-cone_dist);
-        }
-
         // If below the funnel
+        let below_bottom = bottom_y - OVERLAP_DISTANCE_BELOW - point.y;
         if below_bottom > 0.0 {
             // Cylindrical extension below
             let dist_in_cylinder = radial_dist - self.bottom_radius;
@@ -118,7 +128,7 @@ impl Segment for Funnel {
         let bottom_y = self.exit.position.y;
 
         // Core region excludes overlap zones at top and bottom
-        point.y > bottom_y + OVERLAP_DISTANCE && point.y < top_y - OVERLAP_DISTANCE
+        point.y > bottom_y + OVERLAP_DISTANCE_BELOW && point.y < top_y - OVERLAP_DISTANCE_ABOVE
     }
 
     fn entry_port(&self) -> Port {
