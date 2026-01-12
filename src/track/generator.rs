@@ -156,42 +156,91 @@ impl TrackGenerator {
         // Calculate gate dimensions based on marble count
         let marble_spacing = self.config.marble_radius * 2.0 + 0.1;
         let gate_width = marble_spacing * self.config.num_marbles as f32 + 0.2;
+        let gate_radius = gate_width / 2.0;
         let gate_length = 3.5;
         let gate_slope: f32 = 0.25; // Radians
 
-        // Funnel dimensions - top matches gate width
-        let funnel_depth = 10.0;
-        let funnel_top_radius = gate_width / 2.0;
-        let funnel_bottom_radius = self.config.tube_radius;
-        let funnel_top_y = 12.0;
-
-        // Starting gate positioned above funnel
-        let gate_exit_y = funnel_top_y + 0.5;
-        let gate_entry_y = gate_exit_y + gate_length * gate_slope.sin();
+        // Position the starting gate
+        let start_y = 12.0;
+        let gate_entry_y = start_y + gate_length * gate_slope.sin();
         let gate_entry_z = gate_length * gate_slope.cos();
 
         let gate_entry = Port::new(
             Vec3::new(0.0, gate_entry_y, gate_entry_z),
             Vec3::NEG_Z,
             Vec3::Y,
-            gate_width / 2.0,
+            gate_radius,
         );
         let starting_gate = StartingGate::new(gate_width, gate_length, 1.0, gate_slope, gate_entry);
+        let gate_exit = starting_gate.exit_ports()[0].clone();
         track.add_segment(Box::new(starting_gate));
 
-        // Funnel to collect marbles
-        let funnel_entry = Port::new(
-            Vec3::new(0.0, funnel_top_y, 0.0),
-            Vec3::NEG_Y,
-            Vec3::NEG_Z,
-            funnel_top_radius,
-        );
-        let funnel = Funnel::new(funnel_depth, funnel_top_radius, funnel_bottom_radius, funnel_entry);
-        track.add_segment(Box::new(funnel));
+        // Randomly select a collection segment type that works with the wide gate exit
+        let collection_type = self.rng.gen_range(0..5);
 
-        // Continue from funnel exit (pointing down)
+        match collection_type {
+            0 => {
+                // Funnel - vertical drop, collects marbles to center
+                let funnel_depth = self.rng.gen_range(8.0..12.0);
+                let funnel_entry = Port::new(
+                    gate_exit.position - Vec3::Y * 0.3, // Slightly below gate exit
+                    Vec3::NEG_Y,
+                    Vec3::NEG_Z,
+                    gate_radius,
+                );
+                let funnel = Funnel::new(funnel_depth, gate_radius, self.config.tube_radius, funnel_entry);
+                track.add_segment(Box::new(funnel));
+            }
+            1 => {
+                // NarrowingTube - gradually narrows from gate width to tube radius
+                let length = self.rng.gen_range(8.0..15.0);
+                let narrowing = NarrowingTube::new(length, gate_radius, self.config.tube_radius, gate_exit);
+                track.add_segment(Box::new(narrowing));
+            }
+            2 => {
+                // SpiralTube at gate width, then narrowing
+                let turns = self.rng.gen_range(0.5..1.5);
+                let height = self.rng.gen_range(6.0..10.0);
+                let helix_radius = self.rng.gen_range(3.0..5.0);
+                let spiral = SpiralTube::new(turns, height, helix_radius, gate_radius, gate_exit);
+                let spiral_exit = spiral.exit_ports()[0].clone();
+                track.add_segment(Box::new(spiral));
+
+                // Add narrowing after spiral
+                let narrowing = NarrowingTube::new(6.0, gate_radius, self.config.tube_radius, spiral_exit);
+                track.add_segment(Box::new(narrowing));
+            }
+            3 => {
+                // FlatSlope - wide open slope, then narrowing
+                let length = self.rng.gen_range(6.0..10.0);
+                let slope_angle = self.rng.gen_range(0.2..0.4);
+                let slope = FlatSlope::new(length, gate_width, 1.0, slope_angle, gate_exit);
+                let slope_exit = slope.exit_ports()[0].clone();
+                track.add_segment(Box::new(slope));
+
+                // Add narrowing after slope
+                let narrowing = NarrowingTube::new(6.0, gate_radius, self.config.tube_radius, slope_exit);
+                track.add_segment(Box::new(narrowing));
+            }
+            _ => {
+                // HalfPipe - wide half-pipe, then narrowing
+                let length = self.rng.gen_range(8.0..12.0);
+                let half_pipe = HalfPipe::new(length, gate_radius, gate_exit);
+                let pipe_exit = half_pipe.exit_ports()[0].clone();
+                track.add_segment(Box::new(half_pipe));
+
+                // Add narrowing after half-pipe
+                let narrowing = NarrowingTube::new(6.0, gate_radius, self.config.tube_radius, pipe_exit);
+                track.add_segment(Box::new(narrowing));
+            }
+        }
+
+        // Set current radius to tube radius (after collection segment narrows)
+        self.current_radius = self.config.tube_radius;
+
         // Generate remaining segments
-        for _ in 2..num_segments {
+        let segments_added = track.segments().len();
+        for _ in segments_added..num_segments {
             if let Some(segment) = self.generate_next(&track) {
                 track.add_segment(segment);
             }
@@ -206,19 +255,19 @@ impl TrackGenerator {
         // Calculate gate dimensions (same as in generate)
         let marble_spacing = self.config.marble_radius * 2.0 + 0.1;
         let gate_width = marble_spacing * self.config.num_marbles as f32 + 0.2;
+        let gate_radius = gate_width / 2.0;
         let gate_length = 3.5;
         let gate_slope: f32 = 0.25;
 
-        let funnel_top_y = 12.0;
-        let gate_exit_y = funnel_top_y + 0.5;
-        let gate_entry_y = gate_exit_y + gate_length * gate_slope.sin();
+        let start_y = 12.0;
+        let gate_entry_y = start_y + gate_length * gate_slope.sin();
         let gate_entry_z = gate_length * gate_slope.cos();
 
         let gate_entry = Port::new(
             Vec3::new(0.0, gate_entry_y, gate_entry_z),
             Vec3::NEG_Z,
             Vec3::Y,
-            gate_width / 2.0,
+            gate_radius,
         );
 
         // Create starting gate to get spawn positions

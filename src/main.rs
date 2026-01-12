@@ -133,7 +133,12 @@ fn setup(
 ) {
     // Generate procedural track with starting gate
     let num_marbles = 8;
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
     let config = GeneratorConfig {
+        seed,
         num_marbles,
         marble_radius: MARBLE_RADIUS,
         tube_radius: TRACK_RADIUS,
