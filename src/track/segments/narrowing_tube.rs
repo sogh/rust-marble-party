@@ -62,7 +62,7 @@ impl NarrowingTube {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-const OVERLAP_DISTANCE: f32 = 1.0;
+const OVERLAP_DISTANCE: f32 = 2.0;
 
 impl Segment for NarrowingTube {
     fn sdf(&self, point: Vec3) -> f32 {
@@ -75,16 +75,19 @@ impl Segment for NarrowingTube {
         let to_point = point - self.entry.position;
         let along = to_point.dot(axis_dir);
 
+        // Reject points outside axial bounds (with overlap for transitions)
+        if along < -OVERLAP_DISTANCE || along > axis_length + OVERLAP_DISTANCE {
+            return f32::MAX;
+        }
+
         // Get t for radius interpolation (clamped to valid range)
         let t = (along / axis_length).clamp(0.0, 1.0);
         let radius = self.radius_at(t);
 
         // Distance from axis (radial distance with interpolated radius)
-        let on_axis = self.entry.position + axis_dir * along;
+        let on_axis = self.entry.position + axis_dir * along.clamp(0.0, axis_length);
         let radial_dist = (point - on_axis).length() - radius;
 
-        // Pure radial distance - no axial walls
-        // Adjacent segments handle their own regions seamlessly
         -radial_dist
     }
 
@@ -161,5 +164,30 @@ impl Segment for NarrowingTube {
 
     fn type_name(&self) -> &'static str {
         "NarrowingTube"
+    }
+
+    fn sdf_gradient(&self, point: Vec3) -> Vec3 {
+        // For a cone/tapered cylinder, gradient points radially inward
+        let axis = self.exit.position - self.entry.position;
+        let axis_length = axis.length();
+        let axis_dir = axis / axis_length;
+
+        // Project point onto axis - DON'T clamp to allow smooth extrapolation
+        // at segment boundaries for consistent gradients in overlap regions
+        let to_point = point - self.entry.position;
+        let along = to_point.dot(axis_dir);
+
+        // Point on axis closest to the query point (infinite line, not segment)
+        let on_axis = self.entry.position + axis_dir * along;
+
+        // Radial direction from axis to point
+        let radial = point - on_axis;
+        if radial.length_squared() < 0.0001 {
+            // Point is on the axis - use up vector as fallback
+            return Vec3::Y;
+        }
+
+        // Gradient points inward (negative radial direction)
+        -radial.normalize()
     }
 }
