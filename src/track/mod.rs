@@ -161,9 +161,7 @@ impl Port {
     /// - Open profile: Accepts anything
     pub fn validate_connection(&self, other: &Port) -> Result<(), ConnectionError> {
         const POSITION_TOLERANCE: f32 = 0.5;
-        const DIRECTION_TOLERANCE: f32 = -0.5; // cos(120°)
         const SIZE_TOLERANCE: f32 = 0.2;
-        const HEIGHT_TOLERANCE: f32 = 0.1;
 
         // Check position alignment
         let pos_diff = (self.position - other.position).length();
@@ -173,11 +171,12 @@ impl Port {
             });
         }
 
-        // Check direction alignment (should be roughly opposite for exit->entrance)
+        // Check direction alignment (should be roughly parallel for exit->entrance)
+        // Both point in the direction of travel (forward through the track)
         let dir_dot = self.direction.dot(other.direction);
-        if dir_dot > DIRECTION_TOLERANCE {
+        if dir_dot < 0.5 {
             return Err(ConnectionError {
-                reason: format!("Directions not aligned (dot={:.2}, need <{:.2})", dir_dot, DIRECTION_TOLERANCE),
+                reason: format!("Directions not aligned (dot={:.2}, need >=0.5)", dir_dot),
             });
         }
 
@@ -200,49 +199,24 @@ impl Port {
                 }
             }
 
-            // Circular-to-FlatFloor: tube bottom must be at or above floor
-            (PortProfile::Tube { diameter } | PortProfile::HalfPipe { diameter }, PortProfile::FlatFloor { floor_y, .. }) => {
-                let tube_bottom_y = self.position.y - diameter / 2.0;
-                if tube_bottom_y < *floor_y - HEIGHT_TOLERANCE {
-                    return Err(ConnectionError {
-                        reason: format!(
-                            "Tube bottom ({:.2}) below flat floor ({:.2})",
-                            tube_bottom_y, floor_y
-                        ),
-                    });
-                }
+            // Circular-to-FlatFloor: compatible (height is geometry, not connection type)
+            (PortProfile::Tube { .. } | PortProfile::HalfPipe { .. }, PortProfile::FlatFloor { .. }) => {
+                // Heights are adjusted during segment creation, not validated here
             }
 
-            // FlatFloor-to-Circular: floor must be at or below tube bottom
-            (PortProfile::FlatFloor { floor_y, .. }, PortProfile::Tube { diameter } | PortProfile::HalfPipe { diameter }) => {
-                let tube_bottom_y = other.position.y - diameter / 2.0;
-                if *floor_y > tube_bottom_y + HEIGHT_TOLERANCE {
-                    return Err(ConnectionError {
-                        reason: format!(
-                            "Flat floor ({:.2}) above tube bottom ({:.2})",
-                            floor_y, tube_bottom_y
-                        ),
-                    });
-                }
+            // FlatFloor-to-Circular: compatible
+            (PortProfile::FlatFloor { .. }, PortProfile::Tube { .. } | PortProfile::HalfPipe { .. }) => {
+                // Heights are adjusted during segment creation, not validated here
             }
 
-            // FlatFloor-to-FlatFloor: exit floor >= entrance floor (descending or level)
-            (PortProfile::FlatFloor { floor_y: exit_y, width: w1 }, PortProfile::FlatFloor { floor_y: entry_y, width: w2 }) => {
-                // Width should be similar
+            // FlatFloor-to-FlatFloor: width should be similar
+            (PortProfile::FlatFloor { width: w1, .. }, PortProfile::FlatFloor { width: w2, .. }) => {
                 if (w1 - w2).abs() > SIZE_TOLERANCE {
                     return Err(ConnectionError {
                         reason: format!("Width mismatch: {:.2} vs {:.2}", w1, w2),
                     });
                 }
-                // Exit floor should be at or above entrance floor
-                if *exit_y < *entry_y - HEIGHT_TOLERANCE {
-                    return Err(ConnectionError {
-                        reason: format!(
-                            "Floor height mismatch: exit {:.2} below entrance {:.2}",
-                            exit_y, entry_y
-                        ),
-                    });
-                }
+                // Height validation removed - floor heights are geometry, not connection constraints
             }
 
             // Open to anything (already handled above, but for completeness)

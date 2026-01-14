@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use rand::prelude::*;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use std::collections::VecDeque;
 
 use super::{
     Port, PortProfile, Segment, Track,
@@ -31,6 +32,11 @@ pub struct GeneratorConfig {
     pub segment_weights: SegmentWeights,
     /// Whether to ensure track always descends
     pub force_descent: bool,
+    /// How many recent segments to track for repeat penalty (0 = disabled)
+    pub history_depth: usize,
+    /// Weight multiplier applied for each occurrence in history (0.0-1.0)
+    /// e.g., 0.25 means each repeat quarters the weight
+    pub repeat_penalty: f32,
 }
 
 impl Default for GeneratorConfig {
@@ -45,6 +51,8 @@ impl Default for GeneratorConfig {
             max_turn_angle: std::f32::consts::FRAC_PI_2,
             segment_weights: SegmentWeights::default(),
             force_descent: true,
+            history_depth: 3,
+            repeat_penalty: 0.25,
         }
     }
 }
@@ -115,8 +123,8 @@ impl SegmentWeights {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum SegmentType {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SegmentType {
     Straight,
     CurvedLeft,
     CurvedRight,
@@ -133,13 +141,16 @@ pub struct TrackGenerator {
     config: GeneratorConfig,
     /// Track the current tube radius (for narrowing/widening sequences)
     current_radius: f32,
+    /// Recent segment types for repeat penalty calculation
+    recent_segments: VecDeque<SegmentType>,
 }
 
 impl TrackGenerator {
     pub fn new(config: GeneratorConfig) -> Self {
         let rng = ChaCha8Rng::seed_from_u64(config.seed);
         let current_radius = config.tube_radius;
-        Self { rng, config, current_radius }
+        let recent_segments = VecDeque::with_capacity(config.history_depth + 1);
+        Self { rng, config, current_radius, recent_segments }
     }
 
     /// Create with default config but custom seed
@@ -240,11 +251,19 @@ impl TrackGenerator {
 
         // Generate remaining segments
         let segments_added = track.segments().len();
+        let mut segment_names: Vec<&str> = track.segments().iter()
+            .map(|s| s.type_name())
+            .collect();
+
         for _ in segments_added..num_segments {
             if let Some(segment) = self.generate_next(&track) {
+                segment_names.push(segment.type_name());
                 track.add_segment(segment);
             }
         }
+
+        // Log the generated track
+        info!("Generated track: {}", segment_names.join(" -> "));
 
         track
     }
@@ -369,8 +388,12 @@ impl TrackGenerator {
         if let Err(e) = track.validate_segment(segment.as_ref()) {
             // Log warning and try a fallback
             eprintln!("Warning: Generated invalid segment ({}), falling back to straight tube", e);
+            self.record_segment(SegmentType::Straight);
             return Some(Box::new(StraightTube::new(length, self.current_radius, exit_port)));
         }
+
+        // Record this segment type for repeat penalty calculation
+        self.record_segment(segment_type);
 
         Some(segment)
     }
@@ -460,20 +483,20 @@ impl TrackGenerator {
 
     /// Select a segment type from the valid list using configured weights
     fn select_weighted_from(&mut self, valid_types: &[SegmentType]) -> SegmentType {
-        // Calculate total weight for valid types only
+        // Calculate total weight for valid types only (with repeat penalty applied)
         let mut total_weight = 0.0;
         for t in valid_types {
-            total_weight += self.weight_for(*t);
+            total_weight += self.effective_weight_for(*t);
         }
 
         if total_weight <= 0.0 {
             return valid_types[0];
         }
 
-        // Weighted selection
+        // Weighted selection using effective weights
         let mut value = self.rng.r#gen::<f32>() * total_weight;
         for t in valid_types {
-            value -= self.weight_for(*t);
+            value -= self.effective_weight_for(*t);
             if value < 0.0 {
                 return *t;
             }
@@ -500,6 +523,37 @@ impl TrackGenerator {
     pub fn reseed(&mut self, seed: u64) {
         self.rng = ChaCha8Rng::seed_from_u64(seed);
         self.current_radius = self.config.tube_radius;
+        self.recent_segments.clear();
+    }
+
+    /// Get effective weight for a segment type, applying repeat penalty
+    fn effective_weight_for(&self, segment_type: SegmentType) -> f32 {
+        let base_weight = self.weight_for(segment_type);
+
+        if self.config.history_depth == 0 {
+            return base_weight;
+        }
+
+        // Count occurrences of this type in recent history
+        let occurrences = self.recent_segments
+            .iter()
+            .filter(|&&t| t == segment_type)
+            .count();
+
+        if occurrences == 0 {
+            base_weight
+        } else {
+            // Apply exponential penalty: weight * (penalty ^ occurrences)
+            base_weight * self.config.repeat_penalty.powi(occurrences as i32)
+        }
+    }
+
+    /// Record a segment type in recent history
+    fn record_segment(&mut self, segment_type: SegmentType) {
+        self.recent_segments.push_back(segment_type);
+        while self.recent_segments.len() > self.config.history_depth {
+            self.recent_segments.pop_front();
+        }
     }
 }
 
@@ -516,5 +570,202 @@ impl Default for ProceduralTrack {
             generator: TrackGenerator::with_seed(42),
             target_segments: 15,
         }
+    }
+}
+
+impl TrackGenerator {
+    /// Generate a sequence of segment types without creating actual geometry.
+    /// Useful for testing distribution and variety.
+    pub(crate) fn generate_segment_sequence(&mut self, num_segments: usize) -> Vec<SegmentType> {
+        let mut sequence = Vec::with_capacity(num_segments);
+
+        // Simulate starting with a tube exit (like after StartingGate + collection)
+        let simulated_exit = Port::new(
+            Vec3::new(0.0, 10.0, 0.0),
+            Vec3::NEG_Z,
+            Vec3::Y,
+            self.config.tube_radius,
+        );
+
+        // Generate sequence using the same logic as generate_next
+        for _ in 0..num_segments {
+            let valid_types = self.get_valid_segment_types(&simulated_exit);
+
+            if valid_types.is_empty() {
+                sequence.push(SegmentType::Straight);
+                self.record_segment(SegmentType::Straight);
+                continue;
+            }
+
+            let segment_type = self.select_weighted_from(&valid_types);
+            sequence.push(segment_type);
+            self.record_segment(segment_type);
+        }
+
+        sequence
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Test that segment distribution roughly matches configured weights
+    /// and that variety is maintained across many tracks.
+    #[test]
+    fn test_segment_distribution_across_tracks() {
+        let num_tracks: usize = 1000;
+        let segments_per_track: usize = 15;
+
+        let mut total_counts: HashMap<SegmentType, usize> = HashMap::new();
+        let mut tracks_with_dominant_type = 0;
+
+        for seed in 0..num_tracks {
+            let config = GeneratorConfig {
+                seed: seed as u64,
+                ..Default::default()
+            };
+            let mut generator = TrackGenerator::new(config);
+            let sequence = generator.generate_segment_sequence(segments_per_track);
+
+            // Count segments in this track
+            let mut track_counts: HashMap<SegmentType, usize> = HashMap::new();
+            for seg_type in &sequence {
+                *track_counts.entry(*seg_type).or_insert(0) += 1;
+                *total_counts.entry(*seg_type).or_insert(0) += 1;
+            }
+
+            // Check if any single type dominates this track (>60% of segments)
+            let max_count = track_counts.values().max().unwrap_or(&0);
+            if *max_count > (segments_per_track * 6 / 10) {
+                tracks_with_dominant_type += 1;
+            }
+        }
+
+        let total_segments = num_tracks * segments_per_track;
+
+        // Print distribution for debugging
+        println!("\n=== Segment Distribution across {} tracks ===", num_tracks);
+        let mut sorted_counts: Vec<_> = total_counts.iter().collect();
+        sorted_counts.sort_by(|a, b| b.1.cmp(a.1));
+        for (seg_type, count) in &sorted_counts {
+            let percentage = (**count as f64 / total_segments as f64) * 100.0;
+            println!("{:?}: {} ({:.1}%)", seg_type, count, percentage);
+        }
+        println!("\nTracks with dominant type (>60%): {} ({:.1}%)",
+            tracks_with_dominant_type,
+            (tracks_with_dominant_type as f64 / num_tracks as f64) * 100.0
+        );
+
+        // Assertions
+
+        // 1. Straight tubes should be most common (weight 3.0)
+        let straight_count = *total_counts.get(&SegmentType::Straight).unwrap_or(&0);
+        let straight_pct = straight_count as f64 / total_segments as f64;
+        assert!(straight_pct > 0.15, "Straight tubes too rare: {:.1}%", straight_pct * 100.0);
+        assert!(straight_pct < 0.45, "Straight tubes too common: {:.1}%", straight_pct * 100.0);
+
+        // 2. Curves should be common (weight 2.0 each)
+        let curved_left = *total_counts.get(&SegmentType::CurvedLeft).unwrap_or(&0);
+        let curved_right = *total_counts.get(&SegmentType::CurvedRight).unwrap_or(&0);
+        let total_curves = curved_left + curved_right;
+        let curves_pct = total_curves as f64 / total_segments as f64;
+        assert!(curves_pct > 0.20, "Curves too rare: {:.1}%", curves_pct * 100.0);
+
+        // 3. No type should be absent
+        assert!(total_counts.len() >= 6, "Too few segment types generated: {}", total_counts.len());
+
+        // 4. Repeat penalty should prevent too many tracks with dominant types
+        // With history_depth=3 and penalty=0.25, < 10% of tracks should be dominated
+        let dominant_pct = tracks_with_dominant_type as f64 / num_tracks as f64;
+        assert!(dominant_pct < 0.15,
+            "Too many tracks with dominant type: {:.1}% (repeat penalty may not be working)",
+            dominant_pct * 100.0
+        );
+    }
+
+    /// Test that consecutive identical segments are rare within a single track
+    #[test]
+    fn test_repeat_penalty_effectiveness() {
+        let num_tracks: usize = 500;
+        let segments_per_track: usize = 20;
+
+        let mut total_runs_of_3_plus = 0;
+        let mut total_runs_of_4_plus = 0;
+
+        for seed in 0..num_tracks {
+            let config = GeneratorConfig {
+                seed: seed as u64,
+                ..Default::default()
+            };
+            let mut generator = TrackGenerator::new(config);
+            let sequence = generator.generate_segment_sequence(segments_per_track);
+
+            // Count runs of 3+ and 4+ identical segments
+            let mut current_type = None;
+            let mut run_length = 0;
+
+            for seg_type in &sequence {
+                if Some(*seg_type) == current_type {
+                    run_length += 1;
+                } else {
+                    current_type = Some(*seg_type);
+                    run_length = 1;
+                }
+
+                if run_length == 3 {
+                    total_runs_of_3_plus += 1;
+                }
+                if run_length == 4 {
+                    total_runs_of_4_plus += 1;
+                }
+            }
+        }
+
+        println!("\n=== Repeat Penalty Test ({} tracks) ===", num_tracks);
+        println!("Runs of 3+ identical: {}", total_runs_of_3_plus);
+        println!("Runs of 4+ identical: {}", total_runs_of_4_plus);
+
+        // With penalty=0.25, runs of 3+ should be rare, runs of 4+ very rare
+        let runs_3_per_track = total_runs_of_3_plus as f64 / num_tracks as f64;
+        let runs_4_per_track = total_runs_of_4_plus as f64 / num_tracks as f64;
+
+        assert!(runs_3_per_track < 1.0,
+            "Too many runs of 3+: {:.2} per track", runs_3_per_track);
+        assert!(runs_4_per_track < 0.2,
+            "Too many runs of 4+: {:.2} per track", runs_4_per_track);
+    }
+
+    /// Test that different seeds produce different tracks
+    #[test]
+    fn test_seed_produces_variety() {
+        let mut unique_tracks = std::collections::HashSet::new();
+        let num_seeds: usize = 100;
+        let segments_per_track: usize = 10;
+
+        for seed in 0..num_seeds {
+            let config = GeneratorConfig {
+                seed: seed as u64,
+                ..Default::default()
+            };
+            let mut generator = TrackGenerator::new(config);
+            let sequence = generator.generate_segment_sequence(segments_per_track);
+
+            // Convert to string for easy comparison
+            let track_str: String = sequence.iter()
+                .map(|t| format!("{:?}", t).chars().next().unwrap())
+                .collect();
+
+            unique_tracks.insert(track_str);
+        }
+
+        let unique_pct = (unique_tracks.len() as f64 / num_seeds as f64) * 100.0;
+        println!("\n=== Seed Variety Test ===");
+        println!("Unique tracks: {} out of {} ({:.1}%)", unique_tracks.len(), num_seeds, unique_pct);
+
+        // At least 80% of seeds should produce unique tracks
+        assert!(unique_tracks.len() >= num_seeds * 80 / 100,
+            "Not enough variety: only {} unique tracks out of {}", unique_tracks.len(), num_seeds);
     }
 }
