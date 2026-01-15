@@ -76,32 +76,29 @@ impl SpiralTube {
         let forward = Vec3::new(start_dir.x, 0.0, start_dir.z).normalize_or_zero();
         let forward = if forward.length_squared() < 0.01 { Vec3::NEG_Z } else { forward };
 
-        // === LEAD-IN: Straight section before spiral for smooth transition ===
-        let lead_in_length = 2.0;
-        let lead_in_end = start_pos + start_dir * lead_in_length;
+        // No lead-in - spiral starts immediately from entry for better momentum
         self.spine.push(start_pos);
-        self.spine.push(lead_in_end);
 
         // For a vertical helix (spiral staircase), the axis is vertical
-        // The helix center is offset from lead-in end so that point is ON the circle
+        // The helix center is offset from entry so that point is ON the circle
         // and the tangent matches the forward direction
 
         // Tangent of circle at angle θ is perpendicular to radius
         // If we want tangent = forward, radius must be perpendicular to forward
         let right = forward.cross(Vec3::Y).normalize();
 
-        // Center is to the left of lead-in end (so tangent points forward)
+        // Center is to the left of entry (so tangent points forward)
         let center = Vec3::new(
-            lead_in_end.x - right.x * self.helix_radius,
+            start_pos.x - right.x * self.helix_radius,
             0.0, // Center Y doesn't matter, we track Y separately
-            lead_in_end.z - right.z * self.helix_radius,
+            start_pos.z - right.z * self.helix_radius,
         );
 
-        // Starting angle: from center to lead-in end point
-        let to_spiral_start = Vec2::new(lead_in_end.x - center.x, lead_in_end.z - center.z);
+        // Starting angle: from center to entry point
+        let to_spiral_start = Vec2::new(start_pos.x - center.x, start_pos.z - center.z);
         let start_angle = to_spiral_start.y.atan2(to_spiral_start.x);
 
-        // Generate spiral points (skip first since lead_in_end is already added)
+        // Generate spiral points
         for i in 1..=self.segments {
             let t = i as f32 / self.segments as f32;
             // Clockwise rotation (so tangent at entry points forward)
@@ -111,30 +108,30 @@ impl SpiralTube {
             let x = center.x + self.helix_radius * angle.cos();
             let z = center.z + self.helix_radius * angle.sin();
 
-            // Y descends smoothly from lead_in_end height
-            let y = lead_in_end.y - self.descent * t;
+            // Y descends smoothly from entry height
+            let y = start_pos.y - self.descent * t;
 
             self.spine.push(Vec3::new(x, y, z));
         }
 
         // === COMPUTE EXIT PORT ===
-        // Position exit port directly at the last spiral point so the straight tube
-        // starts exactly where the spiral ends - no gap for the marble to bounce in.
-        //
-        // Use the analytical tangent for direction since it's mathematically correct
-        // for a helix, even though the spine is discrete.
+        // Use direction from last two spine points, but ensure a minimum descent angle
+        // to maintain momentum through consecutive spirals
         if self.spine.len() >= 2 {
             let last = self.spine[self.spine.len() - 1];
+            let second_last = self.spine[self.spine.len() - 2];
+            let spine_dir = (last - second_last).normalize();
 
-            // Analytical tangent at end of spiral
-            let end_angle = start_angle - std::f32::consts::TAU * self.loops;
-            let angular_speed = std::f32::consts::TAU * self.loops;
-            let dx = self.helix_radius * end_angle.sin() * angular_speed;
-            let dz = -self.helix_radius * end_angle.cos() * angular_speed;
-            let dy = -self.descent;
-            let exit_dir = Vec3::new(dx, dy, dz).normalize();
+            // Ensure at least 20 degree descent (sin(20°) ≈ 0.34)
+            let min_descent = -0.34;
+            let exit_dir = if spine_dir.y > min_descent {
+                // Blend with a steeper descent
+                let horizontal = Vec3::new(spine_dir.x, 0.0, spine_dir.z).normalize();
+                Vec3::new(horizontal.x * 0.94, min_descent, horizontal.z * 0.94).normalize()
+            } else {
+                spine_dir
+            };
 
-            // Exit port is at the last spiral point - straight tube starts here
             self.exit = Port::new(last, exit_dir, Vec3::Y, self.tube_radius);
         }
 
@@ -163,7 +160,14 @@ impl Segment for SpiralTube {
         // Reject points far behind the entry to avoid interference with previous segment
         let to_point_entry = point - self.entry.position;
         let along_entry = to_point_entry.dot(self.entry.direction);
-        if along_entry < -3.0 {
+        if along_entry < -OVERLAP_DISTANCE {
+            return f32::MAX;
+        }
+
+        // Reject points far past the exit to avoid interference with next segment
+        let to_point_exit = point - self.exit.position;
+        let along_exit = to_point_exit.dot(self.exit.direction);
+        if along_exit > OVERLAP_DISTANCE {
             return f32::MAX;
         }
 
