@@ -52,8 +52,8 @@ impl StraightTube {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-/// Extended to 4.0 to cover the spiral's lead-out region (3.0 units)
-const OVERLAP_DISTANCE: f32 = 4.0;
+/// Experiment: one marble diameter (0.4)
+const OVERLAP_DISTANCE: f32 = 0.4;
 
 impl Segment for StraightTube {
     fn sdf(&self, point: Vec3) -> f32 {

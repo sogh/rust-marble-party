@@ -7,7 +7,23 @@
       "Bash(cargo check:*)",
       "Bash(cargo run:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(timeout 3 tail:*)",
+      "Bash(timeout:*)",
+      "Bash(findstr:*)",
+      "Bash(powershell -Command \"Start-Sleep -Seconds 5\")",
+      "Bash(powershell -Command \"Start-Sleep -Seconds 12\")",
+      "Bash(powershell -Command \"Start-Sleep -Seconds 15\")",
+      "Bash(cargo build:*)",
+      "Bash(target/release/marble_party.exe:*)",
+      "Bash(echo:*)",
+      "Bash(cargo test:*)",
+      "Bash(RUST_LOG=trace timeout 8 target/release/marble_party.exe:*)",
+      "Bash(RUST_LOG=trace timeout 6 target/release/marble_party.exe:*)",
+      "Bash(RUST_LOG=info timeout:*)",
+      "Bash(for i in 1 2 3 4 5)",
+      "Bash(do RUST_LOG=info timeout 3 target/release/marble_party.exe)",
+      "Bash(done)"
     ]
   }
 }

@@ -62,7 +62,8 @@ impl WideningTube {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-const OVERLAP_DISTANCE: f32 = 2.0;
+/// Experiment: one marble diameter (0.4)
+const OVERLAP_DISTANCE: f32 = 0.4;
 
 impl Segment for WideningTube {
     fn sdf(&self, point: Vec3) -> f32 {

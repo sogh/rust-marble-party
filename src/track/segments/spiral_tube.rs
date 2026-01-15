@@ -151,7 +151,8 @@ impl SpiralTube {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-const OVERLAP_DISTANCE: f32 = 1.0; // Matches tube_radius
+/// Experiment: one marble diameter (0.4)
+const OVERLAP_DISTANCE: f32 = 0.4;
 
 impl Segment for SpiralTube {
     fn sdf(&self, point: Vec3) -> f32 {

@@ -190,8 +190,8 @@ impl StartingGate {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-/// The starting gate has MINIMAL overlap since marbles fall off the front edge
-const OVERLAP_DISTANCE: f32 = 0.5;
+/// Experiment: one marble diameter (0.4)
+const OVERLAP_DISTANCE: f32 = 0.4;
 
 impl Segment for StartingGate {
     fn sdf(&self, point: Vec3) -> f32 {

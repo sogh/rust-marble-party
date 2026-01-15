@@ -187,8 +187,9 @@ impl TubeAdapter {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-const OVERLAP_ENTRY: f32 = 1.0;
-const OVERLAP_EXIT: f32 = 2.0;
+/// Experiment: one marble diameter (0.4)
+const OVERLAP_ENTRY: f32 = 0.4;
+const OVERLAP_EXIT: f32 = 0.4;
 
 impl Segment for TubeAdapter {
     fn sdf(&self, point: Vec3) -> f32 {

@@ -83,10 +83,10 @@ impl Funnel {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-/// Only extends BELOW - above is handled by previous segment (starting gate)
-const OVERLAP_DISTANCE_BELOW: f32 = 2.0;
+/// Experiment: one marble diameter (0.4)
+const OVERLAP_DISTANCE_BELOW: f32 = 0.4;
 /// Small overlap above for transition from starting gate
-const OVERLAP_DISTANCE_ABOVE: f32 = 0.3;
+const OVERLAP_DISTANCE_ABOVE: f32 = 0.4;
 
 impl Segment for Funnel {
     fn sdf(&self, point: Vec3) -> f32 {
