@@ -8,7 +8,7 @@ use super::{
     Port, PortProfile, Segment, Track,
     StraightTube, CurvedTube, FlatSlope,
     NarrowingTube, WideningTube, HalfPipe, SpiralTube,
-    StartingGate, Funnel, TubeAdapter,
+    StartingGate, Funnel, TubeAdapter, ReverseTubeAdapter,
 };
 
 /// Configuration for procedural track generation
@@ -134,6 +134,7 @@ pub(crate) enum SegmentType {
     Widening,
     HalfPipe,
     TubeAdapter, // Auto-inserted only, not randomly selected
+    ReverseTubeAdapter, // Auto-inserted only, not randomly selected
 }
 
 /// Procedural track generator
@@ -350,6 +351,28 @@ impl TrackGenerator {
             }
         }
 
+        // AUTO-INSERT: If exiting a Tube/HalfPipe and going to FlatSlope, choose transition method
+        // Option 1: ReverseTubeAdapter (smooth morph from tube to flat)
+        // Option 2: Drop (FlatSlope floor positioned below tube bottom)
+        if matches!(&exit_port.profile, PortProfile::Tube { .. } | PortProfile::HalfPipe { .. }) {
+            if segment_type == SegmentType::FlatSlope {
+                // 50% chance for smooth adapter, 50% for drop
+                let use_adapter = self.rng.gen_bool(0.5);
+                if use_adapter {
+                    // Insert ReverseTubeAdapter to transition from tube to flat floor
+                    self.record_segment(SegmentType::ReverseTubeAdapter);
+                    let exit_width = self.rng.gen_range(2.0..4.0);
+                    return Some(Box::new(ReverseTubeAdapter::new(
+                        8.0,
+                        self.current_radius,
+                        exit_width,
+                        exit_port,
+                    )));
+                }
+                // Otherwise fall through to create FlatSlope with drop positioning
+            }
+        }
+
         // Generate length variation
         let length = self.rng.gen_range(self.config.min_length..self.config.max_length);
 
@@ -378,15 +401,33 @@ impl TrackGenerator {
             }
 
             SegmentType::FlatSlope => {
-                // FlatSlope must have floor at or below the exit's floor level
                 let width = self.rng.gen_range(2.0..4.0);
                 let wall_height = self.rng.gen_range(0.5..1.5);
                 let slope_angle = self.rng.gen_range(0.15..0.4);
 
-                // Adjust entry port to have floor at correct height
-                let floor_y = exit_port.floor_y();
+                // Calculate floor Y based on exit profile
+                // For Tube/HalfPipe: floor must be BELOW tube bottom (drop transition)
+                // For FlatFloor: floor continues at same level
+                let floor_y = match &exit_port.profile {
+                    PortProfile::Tube { diameter } | PortProfile::HalfPipe { diameter } => {
+                        // Drop: floor is below tube bottom by at least half the tube diameter
+                        let tube_bottom = exit_port.position.y - diameter / 2.0;
+                        let drop_distance = self.rng.gen_range(0.5..1.5); // Random drop amount
+                        tube_bottom - drop_distance
+                    }
+                    _ => exit_port.floor_y(),
+                };
+
+                // Position the entry point to match the drop
+                let entry_position = if matches!(&exit_port.profile, PortProfile::Tube { .. } | PortProfile::HalfPipe { .. }) {
+                    // For drop: entry is slightly forward and down
+                    exit_port.position + exit_port.direction * 0.5 - Vec3::Y * (exit_port.position.y - floor_y - wall_height)
+                } else {
+                    exit_port.position
+                };
+
                 let adjusted_port = Port::with_profile(
-                    exit_port.position,
+                    entry_position,
                     exit_port.direction,
                     exit_port.up,
                     width / 2.0,
@@ -418,6 +459,11 @@ impl TrackGenerator {
                 // TubeAdapter is only auto-inserted above, should never be selected here
                 // But we need to handle the case for exhaustive matching
                 unreachable!("TubeAdapter should only be auto-inserted, not selected")
+            }
+
+            SegmentType::ReverseTubeAdapter => {
+                // ReverseTubeAdapter is only auto-inserted above, should never be selected here
+                unreachable!("ReverseTubeAdapter should only be auto-inserted, not selected")
             }
         };
 
@@ -554,6 +600,7 @@ impl TrackGenerator {
             SegmentType::Widening => self.config.segment_weights.widening,
             SegmentType::HalfPipe => self.config.segment_weights.half_pipe,
             SegmentType::TubeAdapter => 0.0, // Not randomly selected, only auto-inserted
+            SegmentType::ReverseTubeAdapter => 0.0, // Not randomly selected, only auto-inserted
         }
     }
 
