@@ -3,7 +3,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::time::{Fixed, Virtual};
 
 mod track;
-use track::{Track, Port, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, SpiralTube, Funnel, StartingGate, Segment, TrackGenerator, GeneratorConfig};
+use track::{Track, Port, PortProfile, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, SpiralTube, Funnel, StartingGate, Segment, TrackGenerator, GeneratorConfig};
 
 // ============================================================================
 // CONSTANTS
@@ -28,6 +28,13 @@ impl Default for PhysicsTimeScale {
     fn default() -> Self {
         Self(1.0)  // Normal speed
     }
+}
+
+/// Command-line track specification
+#[derive(Resource, Default)]
+struct TrackSpec {
+    /// Comma-separated segment names, e.g. "StartingGate,HalfPipe,StraightTube"
+    segments: Option<String>,
 }
 
 // ============================================================================
@@ -126,27 +133,146 @@ impl Default for TrackBuilder {
 // SYSTEMS
 // ============================================================================
 
+/// Build a track from comma-separated segment names
+/// Example: "StartingGate,HalfPipe,StraightTube,CurvedLeft"
+fn build_track_from_spec(spec: &str, num_marbles: usize, marble_radius: f32) -> (Track, Vec<Vec3>) {
+    let mut track = Track::new();
+
+    // Parse segment names
+    let segment_names: Vec<&str> = spec.split(',').map(|s| s.trim()).collect();
+
+    if segment_names.is_empty() {
+        panic!("Track spec cannot be empty");
+    }
+
+    // Calculate starting gate dimensions
+    let marble_spacing = marble_radius * 2.0 + 0.1;
+    let gate_width = marble_spacing * num_marbles as f32 + 0.2;
+    let gate_radius = gate_width / 2.0;
+    let gate_length = 3.5;
+    let gate_slope: f32 = 0.25;
+
+    let start_y = 12.0;
+    let gate_entry_y = start_y + gate_length * gate_slope.sin();
+    let gate_entry_z = gate_length * gate_slope.cos();
+
+    let gate_entry = Port::new(
+        Vec3::new(0.0, gate_entry_y, gate_entry_z),
+        Vec3::NEG_Z,
+        Vec3::Y,
+        gate_radius,
+    );
+
+    // Always start with StartingGate
+    let starting_gate = StartingGate::new(gate_width, gate_length, 1.0, gate_slope, gate_entry);
+    let spawn_positions = starting_gate.get_spawn_positions(num_marbles, marble_radius);
+    let mut last_exit = starting_gate.exit_ports()[0].clone();
+    track.add_segment(Box::new(starting_gate));
+
+    // Current tube radius for narrowing/widening
+    let mut current_radius = TRACK_RADIUS;
+
+    // Process remaining segments (skip first if it's StartingGate)
+    let start_idx = if segment_names[0].eq_ignore_ascii_case("StartingGate") { 1 } else { 0 };
+
+    for name in &segment_names[start_idx..] {
+        let segment: Box<dyn Segment> = match name.to_lowercase().as_str() {
+            "straighttube" | "straight" => {
+                Box::new(StraightTube::new(8.0, current_radius, last_exit.clone()))
+            }
+            "curvedleft" | "left" => {
+                Box::new(CurvedTube::new(0.8, 5.0, current_radius, last_exit.clone()))
+            }
+            "curvedright" | "right" => {
+                Box::new(CurvedTube::new(-0.8, 5.0, current_radius, last_exit.clone()))
+            }
+            "curvedtube" | "curved" => {
+                Box::new(CurvedTube::new(0.8, 5.0, current_radius, last_exit.clone()))
+            }
+            "halfpipe" | "half" => {
+                // Use wider radius for half-pipe to accommodate marbles
+                Box::new(HalfPipe::new(10.0, gate_radius, last_exit.clone()))
+            }
+            "flatslope" | "flat" => {
+                let floor_y = last_exit.floor_y();
+                let adjusted_port = Port::with_profile(
+                    last_exit.position,
+                    last_exit.direction,
+                    last_exit.up,
+                    gate_radius,
+                    track::PortProfile::flat_floor(gate_width, floor_y),
+                );
+                Box::new(FlatSlope::new(8.0, gate_width, 1.0, 0.25, adjusted_port))
+            }
+            "narrowingtube" | "narrowing" | "narrow" => {
+                let new_radius = current_radius * 0.7;
+                let seg = NarrowingTube::new(6.0, current_radius, new_radius.max(TRACK_RADIUS * 0.5), last_exit.clone());
+                current_radius = new_radius.max(TRACK_RADIUS * 0.5);
+                Box::new(seg)
+            }
+            "wideningtube" | "widening" | "wide" => {
+                let new_radius = (current_radius * 1.3).min(gate_radius);
+                let seg = WideningTube::new(6.0, current_radius, new_radius, last_exit.clone());
+                current_radius = new_radius;
+                Box::new(seg)
+            }
+            "spiraltube" | "spiral" => {
+                Box::new(SpiralTube::new(1.0, 8.0, 4.0, current_radius, last_exit.clone()))
+            }
+            "funnel" => {
+                let funnel_entry = Port::new(
+                    last_exit.position - Vec3::Y * 0.3,
+                    Vec3::NEG_Y,
+                    Vec3::NEG_Z,
+                    gate_radius,
+                );
+                Box::new(Funnel::new(10.0, gate_radius, TRACK_RADIUS, funnel_entry))
+            }
+            other => {
+                eprintln!("Unknown segment type: '{}', using StraightTube", other);
+                Box::new(StraightTube::new(8.0, current_radius, last_exit.clone()))
+            }
+        };
+
+        last_exit = segment.exit_ports()[0].clone();
+        track.add_segment(segment);
+    }
+
+    // Log the built track
+    let names: Vec<&str> = track.segments().iter().map(|s| s.type_name()).collect();
+    info!("Built custom track: {}", names.join(" -> "));
+
+    (track, spawn_positions)
+}
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    track_spec: Res<TrackSpec>,
 ) {
-    // Generate procedural track with starting gate
     let num_marbles = 8;
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let config = GeneratorConfig {
-        seed,
-        num_marbles,
-        marble_radius: MARBLE_RADIUS,
-        tube_radius: TRACK_RADIUS,
-        ..Default::default()
-    };
 
-    let mut generator = TrackGenerator::new(config);
-    let (track, spawn_positions) = generator.generate_with_spawns(10); // 10 segments total
+    // Either build from spec or generate procedurally
+    let (track, spawn_positions) = if let Some(ref spec) = track_spec.segments {
+        build_track_from_spec(spec, num_marbles, MARBLE_RADIUS)
+    } else {
+        // Generate procedural track with starting gate
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let config = GeneratorConfig {
+            seed,
+            num_marbles,
+            marble_radius: MARBLE_RADIUS,
+            tube_radius: TRACK_RADIUS,
+            ..Default::default()
+        };
+
+        let mut generator = TrackGenerator::new(config);
+        generator.generate_with_spawns(10) // 10 segments total
+    };
 
     commands.insert_resource(track);
 
@@ -808,10 +934,52 @@ fn log_red_marble_position(
 // MAIN
 // ============================================================================
 
+fn parse_args() -> TrackSpec {
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut track_spec = TrackSpec::default();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--track" | "-t" => {
+                if i + 1 < args.len() {
+                    track_spec.segments = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("--track requires a segment list (e.g., 'HalfPipe,StraightTube,CurvedLeft')");
+                    std::process::exit(1);
+                }
+            }
+            "--help" | "-h" => {
+                println!("Marble Party - A marble racing game\n");
+                println!("Usage: marble_party [OPTIONS]\n");
+                println!("Options:");
+                println!("  -t, --track <SEGMENTS>  Specify track segments (comma-separated)");
+                println!("  -h, --help              Show this help message\n");
+                println!("Segment types:");
+                println!("  StartingGate (auto-added), HalfPipe, StraightTube, CurvedLeft,");
+                println!("  CurvedRight, FlatSlope, NarrowingTube, WideningTube, SpiralTube, Funnel\n");
+                println!("Example:");
+                println!("  marble_party --track \"HalfPipe,StraightTube,CurvedLeft,CurvedRight\"");
+                std::process::exit(0);
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    track_spec
+}
+
 fn main() {
+    let track_spec = parse_args();
+
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
+        .insert_resource(track_spec)
         .init_resource::<PhysicsTimeScale>()
         .init_resource::<RedMarbleDebug>()
         .init_resource::<TrackBuilder>()

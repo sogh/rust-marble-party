@@ -8,7 +8,7 @@ use super::{
     Port, PortProfile, Segment, Track,
     StraightTube, CurvedTube, FlatSlope,
     NarrowingTube, WideningTube, HalfPipe, SpiralTube,
-    StartingGate, Funnel,
+    StartingGate, Funnel, TubeAdapter,
 };
 
 /// Configuration for procedural track generation
@@ -133,6 +133,7 @@ pub(crate) enum SegmentType {
     Narrowing,
     Widening,
     HalfPipe,
+    TubeAdapter, // Auto-inserted only, not randomly selected
 }
 
 /// Procedural track generator
@@ -203,17 +204,25 @@ impl TrackGenerator {
                 track.add_segment(Box::new(funnel));
             }
             1 => {
-                // NarrowingTube - gradually narrows from gate width to tube radius
+                // TubeAdapter -> NarrowingTube - smooth transition from flat gate to tube
+                let adapter = TubeAdapter::new(8.0, gate_width, gate_radius, gate_exit);
+                let adapter_exit = adapter.exit_ports()[0].clone();
+                track.add_segment(Box::new(adapter));
+
                 let length = self.rng.gen_range(8.0..15.0);
-                let narrowing = NarrowingTube::new(length, gate_radius, self.config.tube_radius, gate_exit);
+                let narrowing = NarrowingTube::new(length, gate_radius, self.config.tube_radius, adapter_exit);
                 track.add_segment(Box::new(narrowing));
             }
             2 => {
-                // SpiralTube at gate width, then narrowing
+                // TubeAdapter -> SpiralTube at gate width, then narrowing
+                let adapter = TubeAdapter::new(8.0, gate_width, gate_radius, gate_exit);
+                let adapter_exit = adapter.exit_ports()[0].clone();
+                track.add_segment(Box::new(adapter));
+
                 let turns = self.rng.gen_range(0.5..1.5);
                 let height = self.rng.gen_range(6.0..10.0);
                 let helix_radius = self.rng.gen_range(3.0..5.0);
-                let spiral = SpiralTube::new(turns, height, helix_radius, gate_radius, gate_exit);
+                let spiral = SpiralTube::new(turns, height, helix_radius, gate_radius, adapter_exit);
                 let spiral_exit = spiral.exit_ports()[0].clone();
                 track.add_segment(Box::new(spiral));
 
@@ -222,21 +231,29 @@ impl TrackGenerator {
                 track.add_segment(Box::new(narrowing));
             }
             3 => {
-                // FlatSlope - wide open slope, then narrowing
+                // FlatSlope - wide open slope, then TubeAdapter, then narrowing
                 let length = self.rng.gen_range(6.0..10.0);
                 let slope_angle = self.rng.gen_range(0.2..0.4);
                 let slope = FlatSlope::new(length, gate_width, 1.0, slope_angle, gate_exit);
                 let slope_exit = slope.exit_ports()[0].clone();
                 track.add_segment(Box::new(slope));
 
-                // Add narrowing after slope
-                let narrowing = NarrowingTube::new(6.0, gate_radius, self.config.tube_radius, slope_exit);
+                // TubeAdapter before narrowing tube
+                let adapter = TubeAdapter::new(8.0, gate_width, gate_radius, slope_exit);
+                let adapter_exit = adapter.exit_ports()[0].clone();
+                track.add_segment(Box::new(adapter));
+
+                let narrowing = NarrowingTube::new(6.0, gate_radius, self.config.tube_radius, adapter_exit);
                 track.add_segment(Box::new(narrowing));
             }
             _ => {
-                // HalfPipe - wide half-pipe, then narrowing
+                // TubeAdapter -> HalfPipe, then narrowing
+                let adapter = TubeAdapter::new(8.0, gate_width, gate_radius, gate_exit);
+                let adapter_exit = adapter.exit_ports()[0].clone();
+                track.add_segment(Box::new(adapter));
+
                 let length = self.rng.gen_range(8.0..12.0);
-                let half_pipe = HalfPipe::new(length, gate_radius, gate_exit);
+                let half_pipe = HalfPipe::new(length, gate_radius, adapter_exit);
                 let pipe_exit = half_pipe.exit_ports()[0].clone();
                 track.add_segment(Box::new(half_pipe));
 
@@ -319,6 +336,20 @@ impl TrackGenerator {
         // Select from valid types using weights
         let segment_type = self.select_weighted_from(&valid_types);
 
+        // AUTO-INSERT: If exiting a FlatFloor and going to a tube type, insert TubeAdapter first
+        if let PortProfile::FlatFloor { width, floor_y } = &exit_port.profile {
+            if self.is_tube_entry_type(segment_type) {
+                // Insert TubeAdapter to transition from flat floor to tube
+                self.record_segment(SegmentType::TubeAdapter);
+                return Some(Box::new(TubeAdapter::new(
+                    8.0, // Default adapter length
+                    *width,
+                    self.current_radius,
+                    exit_port,
+                )));
+            }
+        }
+
         // Generate length variation
         let length = self.rng.gen_range(self.config.min_length..self.config.max_length);
 
@@ -381,6 +412,12 @@ impl TrackGenerator {
 
             SegmentType::HalfPipe => {
                 Box::new(HalfPipe::new(length, self.current_radius * 1.5, exit_port.clone()))
+            }
+
+            SegmentType::TubeAdapter => {
+                // TubeAdapter is only auto-inserted above, should never be selected here
+                // But we need to handle the case for exhaustive matching
+                unreachable!("TubeAdapter should only be auto-inserted, not selected")
             }
         };
 
@@ -446,14 +483,14 @@ impl TrackGenerator {
                 valid.push(SegmentType::FlatSlope);
             }
 
-            // FlatFloor exits - can connect to flat floors or tubes (if tube is at/below floor level)
+            // FlatFloor exits - can connect to flat floors or tube types
+            // Note: When a tube type is selected, generate_next() will auto-insert
+            // a TubeAdapter first to provide a smooth transition
             PortProfile::FlatFloor { width, floor_y } => {
                 // FlatSlope to FlatSlope (descending or level)
                 valid.push(SegmentType::FlatSlope);
 
-                // Can transition to tubes if the floor is at/above tube bottom
-                // This is typically achieved by the tube being positioned with its
-                // center at floor_y + radius
+                // Tube types - TubeAdapter will be auto-inserted before these
                 valid.push(SegmentType::Straight);
                 valid.push(SegmentType::CurvedLeft);
                 valid.push(SegmentType::CurvedRight);
@@ -516,6 +553,7 @@ impl TrackGenerator {
             SegmentType::Narrowing => self.config.segment_weights.narrowing,
             SegmentType::Widening => self.config.segment_weights.widening,
             SegmentType::HalfPipe => self.config.segment_weights.half_pipe,
+            SegmentType::TubeAdapter => 0.0, // Not randomly selected, only auto-inserted
         }
     }
 
@@ -524,6 +562,19 @@ impl TrackGenerator {
         self.rng = ChaCha8Rng::seed_from_u64(seed);
         self.current_radius = self.config.tube_radius;
         self.recent_segments.clear();
+    }
+
+    /// Check if a segment type requires a tube entry (and thus needs TubeAdapter from FlatFloor)
+    fn is_tube_entry_type(&self, segment_type: SegmentType) -> bool {
+        matches!(segment_type,
+            SegmentType::Straight |
+            SegmentType::CurvedLeft |
+            SegmentType::CurvedRight |
+            SegmentType::Spiral |
+            SegmentType::Narrowing |
+            SegmentType::Widening |
+            SegmentType::HalfPipe
+        )
     }
 
     /// Get effective weight for a segment type, applying repeat penalty

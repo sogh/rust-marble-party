@@ -116,26 +116,26 @@ impl Segment for HalfPipe {
             return f32::MAX;
         }
 
-        // Distance from the center axis (which follows the slope)
-        // The half-pipe is a semicircle in the local XY plane
-        // Free space is ABOVE the curved floor (positive SDF)
-        // Solid is BELOW the curved floor (negative SDF)
-        let dist_from_center = (local_x * local_x + local_y * local_y).sqrt();
+        // Half-pipe geometry:
+        // - The center axis runs along direction at local_y = 0, local_x = 0
+        // - The curved floor is a semicircle below the axis (local_y < 0)
+        // - The rim is at local_y = 0, the floor bottom at local_y = -radius
+        // - Above the rim (local_y > 0) is open air
 
-        // SDF: positive when above curved floor (free space), negative when in floor (solid)
-        // This matches tube convention: positive = inside track, negative = in wall
-        let curved_dist = dist_from_center - self.radius;
-
-        // Above the rim (local_y > radius), it's open air - not our concern
-        // But we still provide collision for the curved wall surface
-        if local_y > self.radius && local_x.abs() <= self.radius {
-            // Above the half pipe opening - open air, very far from surface
+        // Above the rim = open air, not part of the half-pipe
+        if local_y > 0.0 {
             return f32::MAX;
         }
 
-        // For the semicircle region (local_y <= 0 means in lower half)
-        // or on the curved walls (|local_x| approaches radius with local_y > 0)
-        curved_dist
+        // Below the rim: use distance from the curved floor surface
+        // The floor is at distance = radius from the center axis
+        let dist_from_center = (local_x * local_x + local_y * local_y).sqrt();
+
+        // SDF for bowl/gutter geometry:
+        // - Positive when inside the curve (free space where marbles roll)
+        // - Zero at the curved surface
+        // - Negative when penetrating the floor (solid)
+        self.radius - dist_from_center
     }
 
     fn is_in_core_region(&self, point: Vec3) -> bool {

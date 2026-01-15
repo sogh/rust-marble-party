@@ -9,6 +9,7 @@ mod half_pipe;
 mod bowl;
 mod fork;
 mod starting_gate;
+mod tube_adapter;
 
 pub use spiral_tube::SpiralTube;
 pub use straight_tube::StraightTube;
@@ -21,3 +22,4 @@ pub use half_pipe::HalfPipe;
 pub use bowl::Bowl;
 pub use fork::Fork;
 pub use starting_gate::StartingGate;
+pub use tube_adapter::TubeAdapter;
