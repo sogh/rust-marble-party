@@ -3,7 +3,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::time::{Fixed, Virtual};
 
 mod track;
-use track::{Track, Port, PortProfile, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, SpiralTube, Funnel, StartingGate, Segment, TrackGenerator, GeneratorConfig};
+use track::{Track, Port, PortProfile, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, SpiralTube, Funnel, StartingGate, Segment, TrackGenerator, GeneratorConfig, TubeAdapter};
 
 // ============================================================================
 // CONSTANTS
@@ -175,7 +175,28 @@ fn build_track_from_spec(spec: &str, num_marbles: usize, marble_radius: f32) -> 
     // Process remaining segments (skip first if it's StartingGate)
     let start_idx = if segment_names[0].eq_ignore_ascii_case("StartingGate") { 1 } else { 0 };
 
+    // Helper to check if segment type requires tube profile
+    fn needs_tube_profile(name: &str) -> bool {
+        matches!(name.to_lowercase().as_str(),
+            "straighttube" | "straight" |
+            "curvedleft" | "left" |
+            "curvedright" | "right" |
+            "curvedtube" | "curved" |
+            "halfpipe" | "half" |
+            "narrowingtube" | "narrowing" | "narrow" |
+            "wideningtube" | "widening" | "wide" |
+            "spiraltube" | "spiral"
+        )
+    }
+
     for name in &segment_names[start_idx..] {
+        // Auto-insert TubeAdapter when transitioning from FlatFloor to Tube profile
+        if matches!(last_exit.profile, PortProfile::FlatFloor { .. }) && needs_tube_profile(name) {
+            let adapter = TubeAdapter::new(4.0, gate_width, current_radius, last_exit.clone());
+            last_exit = adapter.exit_ports()[0].clone();
+            track.add_segment(Box::new(adapter));
+        }
+
         let segment: Box<dyn Segment> = match name.to_lowercase().as_str() {
             "straighttube" | "straight" => {
                 Box::new(StraightTube::new(8.0, current_radius, last_exit.clone()))
@@ -351,78 +372,98 @@ fn marble_physics(
         // Store previous position for render interpolation
         marble.previous_position = marble.physics_position;
 
-        // Apply gravity
-        marble.velocity += GRAVITY * dt;
+        // === ANTI-TUNNELING: Adaptive substepping ===
+        // Calculate how far the marble will move this frame
+        // Subdivide into substeps to prevent tunneling through thin geometry
+        let speed = marble.velocity.length();
+        let expected_displacement = speed * dt;
 
-        // Predict next position - use physics_position as source of truth, not transform
-        // (transform.translation gets modified by interpolation for rendering)
-        let next_pos = marble.physics_position + marble.velocity * dt;
+        // Maximum distance per substep = 50% of marble radius
+        // This ensures we can't skip over walls thinner than the marble
+        let max_step_distance = marble.radius * 0.5;
 
-        // Check SDF penetration using fast local check
-        let dist = track.sdf_near_segment(next_pos, marble.current_segment);
-        let penetration = marble.radius - dist;
-
-        // Track debug info for red marble (marble 0)
-        if marble_id.0 == 0 {
-            red_marble_debug.sdf_distance = dist;
-            red_marble_debug.penetration = penetration.max(0.0);
-        }
-
-        // Cap penetration to prevent physics explosions from buggy SDF values
-        // Max penetration is one marble diameter
-        let max_penetration = marble.radius * 2.0;
-        let penetration = penetration.min(max_penetration);
-
-        if penetration > 0.0 {
-            // Use previous segment's gradient during transition buffer period
-            // This prevents the "lip" effect at segment junctions
-            const TRANSITION_BUFFER: f32 = 2.0; // Distance to travel before using new segment's gradient
-
-            let gradient_segment = if marble.transition_distance < TRANSITION_BUFFER
-                && marble.previous_segment >= 0
-                && marble.previous_segment != marble.current_segment
-            {
-                // Still in transition buffer - use previous segment's gradient
-                marble.previous_segment
-            } else {
-                marble.current_segment
-            };
-
-            let normal = if gradient_segment >= 0 {
-                track.segment_gradient(gradient_segment as usize, next_pos)
-            } else {
-                track.sdf_gradient(next_pos)
-            };
-
-            // Track collision info for red marble
-            if marble_id.0 == 0 {
-                red_marble_debug.is_colliding = true;
-                red_marble_debug.collision_normal = normal;
-            }
-
-            // Resolve penetration (capped to prevent explosions)
-            let corrected_pos = next_pos + normal * penetration;
-
-            // Decompose velocity
-            let vel_normal = normal * marble.velocity.dot(normal);
-            let vel_tangent = marble.velocity - vel_normal;
-
-            // Apply friction and restitution
-            marble.velocity = vel_tangent * FRICTION - vel_normal * RESTITUTION;
-            marble.physics_position = corrected_pos;
+        // Calculate number of substeps needed (minimum 1)
+        let num_substeps = if expected_displacement > max_step_distance {
+            ((expected_displacement / max_step_distance).ceil() as usize).max(1).min(16)
         } else {
-            marble.physics_position = next_pos;
+            1
+        };
 
-            // Track no collision for red marble
-            if marble_id.0 == 0 {
-                red_marble_debug.is_colliding = false;
-                red_marble_debug.collision_normal = Vec3::ZERO;
+        let sub_dt = dt / num_substeps as f32;
+
+        // Run physics substeps
+        for substep in 0..num_substeps {
+            // Apply gravity (distributed across substeps)
+            marble.velocity += GRAVITY * sub_dt;
+
+            // Predict next position
+            let next_pos = marble.physics_position + marble.velocity * sub_dt;
+
+            // Check SDF penetration using fast local check
+            let dist = track.sdf_near_segment(next_pos, marble.current_segment);
+            let penetration = marble.radius - dist;
+
+            // Track debug info for red marble (marble 0) - only on first substep
+            if marble_id.0 == 0 && substep == 0 {
+                red_marble_debug.sdf_distance = dist;
+                red_marble_debug.penetration = penetration.max(0.0);
             }
-        }
 
-        // Update transition distance (distance traveled since last segment change)
-        let distance_traveled = marble.velocity.length() * dt;
-        marble.transition_distance += distance_traveled;
+            // Cap penetration to prevent physics explosions from buggy SDF values
+            // Max penetration is one marble diameter
+            let max_penetration = marble.radius * 2.0;
+            let penetration = penetration.min(max_penetration);
+
+            if penetration > 0.0 {
+                // Use previous segment's gradient during transition buffer period
+                // This prevents the "lip" effect at segment junctions
+                const TRANSITION_BUFFER: f32 = 2.0;
+
+                let gradient_segment = if marble.transition_distance < TRANSITION_BUFFER
+                    && marble.previous_segment >= 0
+                    && marble.previous_segment != marble.current_segment
+                {
+                    marble.previous_segment
+                } else {
+                    marble.current_segment
+                };
+
+                let normal = if gradient_segment >= 0 {
+                    track.segment_gradient(gradient_segment as usize, next_pos)
+                } else {
+                    track.sdf_gradient(next_pos)
+                };
+
+                // Track collision info for red marble
+                if marble_id.0 == 0 && substep == 0 {
+                    red_marble_debug.is_colliding = true;
+                    red_marble_debug.collision_normal = normal;
+                }
+
+                // Resolve penetration (capped to prevent explosions)
+                let corrected_pos = next_pos + normal * penetration;
+
+                // Decompose velocity
+                let vel_normal = normal * marble.velocity.dot(normal);
+                let vel_tangent = marble.velocity - vel_normal;
+
+                // Apply friction and restitution
+                marble.velocity = vel_tangent * FRICTION - vel_normal * RESTITUTION;
+                marble.physics_position = corrected_pos;
+            } else {
+                marble.physics_position = next_pos;
+
+                // Track no collision for red marble
+                if marble_id.0 == 0 && substep == 0 {
+                    red_marble_debug.is_colliding = false;
+                    red_marble_debug.collision_normal = Vec3::ZERO;
+                }
+            }
+
+            // Update transition distance per substep
+            let distance_traveled = marble.velocity.length() * sub_dt;
+            marble.transition_distance += distance_traveled;
+        }
 
         // Track which segment the marble is in - only allow forward transitions
         // This prevents oscillation at junctions (uses fast local search)
