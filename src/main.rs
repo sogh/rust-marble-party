@@ -31,10 +31,21 @@ impl Default for PhysicsTimeScale {
 }
 
 /// Command-line track specification
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct TrackSpec {
     /// Comma-separated segment names, e.g. "StartingGate,HalfPipe,StraightTube"
     segments: Option<String>,
+    /// Number of marbles to spawn (default: 1)
+    num_marbles: usize,
+}
+
+impl Default for TrackSpec {
+    fn default() -> Self {
+        Self {
+            segments: None,
+            num_marbles: 1, // Default to just the red marble
+        }
+    }
 }
 
 // ============================================================================
@@ -272,7 +283,7 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     track_spec: Res<TrackSpec>,
 ) {
-    let num_marbles = 8;
+    let num_marbles = track_spec.num_marbles;
 
     // Either build from spec or generate procedurally
     let (track, spawn_positions) = if let Some(ref spec) = track_spec.segments {
@@ -297,9 +308,9 @@ fn setup(
 
     commands.insert_resource(track);
 
-    // Spawn 8 marbles with different colors - use positions from starting gate
+    // Spawn marbles with different colors - use positions from starting gate
     let marble_colors = [
-        Color::srgb(0.9, 0.1, 0.1), // Red
+        Color::srgb(0.9, 0.1, 0.1), // Red (marble 0)
         Color::srgb(0.1, 0.7, 0.1), // Green
         Color::srgb(0.1, 0.3, 0.9), // Blue
         Color::srgb(0.9, 0.9, 0.1), // Yellow
@@ -310,12 +321,13 @@ fn setup(
     ];
 
     let mesh = meshes.add(Sphere::new(MARBLE_RADIUS));
-    for (i, color) in marble_colors.iter().enumerate() {
+    for i in 0..num_marbles {
+        let color = marble_colors[i];
         let start_pos = spawn_positions[i];
         commands.spawn((
             Mesh3d(mesh.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: *color,
+                base_color: color,
                 metallic: 0.9,
                 perceptual_roughness: 0.1,
                 ..default()
@@ -992,17 +1004,35 @@ fn parse_args() -> TrackSpec {
                     std::process::exit(1);
                 }
             }
+            "--marbles" | "-m" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<usize>() {
+                        Ok(n) if n >= 1 && n <= 8 => {
+                            track_spec.num_marbles = n;
+                            i += 2;
+                        }
+                        _ => {
+                            eprintln!("--marbles requires a number between 1 and 8");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("--marbles requires a number (1-8)");
+                    std::process::exit(1);
+                }
+            }
             "--help" | "-h" => {
                 println!("Marble Party - A marble racing game\n");
                 println!("Usage: marble_party [OPTIONS]\n");
                 println!("Options:");
                 println!("  -t, --track <SEGMENTS>  Specify track segments (comma-separated)");
+                println!("  -m, --marbles <N>       Number of marbles (1-8, default: 1)");
                 println!("  -h, --help              Show this help message\n");
                 println!("Segment types:");
                 println!("  StartingGate (auto-added), HalfPipe, StraightTube, CurvedLeft,");
                 println!("  CurvedRight, FlatSlope, NarrowingTube, WideningTube, SpiralTube, Funnel\n");
                 println!("Example:");
-                println!("  marble_party --track \"HalfPipe,StraightTube,CurvedLeft,CurvedRight\"");
+                println!("  marble_party --track \"HalfPipe,StraightTube,CurvedLeft,CurvedRight\" -m 4");
                 std::process::exit(0);
             }
             _ => {
