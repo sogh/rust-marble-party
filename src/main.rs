@@ -3,7 +3,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::time::{Fixed, Virtual};
 
 mod track;
-use track::{Track, Port, PortProfile, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, SpiralTube, Funnel, StartingGate, Segment, TrackGenerator, GeneratorConfig, TubeAdapter};
+use track::{Track, Port, PortProfile, StraightTube, CurvedTube, FlatSlope, NarrowingTube, WideningTube, HalfPipe, SpiralTube, Funnel, StartingGate, FinishLine, Segment, TrackGenerator, GeneratorConfig, TubeAdapter, ReverseTubeAdapter};
 
 // ============================================================================
 // CONSTANTS
@@ -260,13 +260,26 @@ fn build_track_from_spec(spec: &str, num_marbles: usize, marble_radius: f32) -> 
                 );
                 Box::new(Funnel::new(10.0, gate_radius, TRACK_RADIUS, funnel_entry))
             }
+            "finishline" | "finish" => {
+                // Auto-insert ReverseTubeAdapter if coming from tube
+                if matches!(last_exit.profile, PortProfile::Tube { .. } | PortProfile::HalfPipe { .. }) {
+                    let adapter = ReverseTubeAdapter::new(8.0, current_radius, gate_width, last_exit.clone());
+                    last_exit = adapter.exit_ports()[0].clone();
+                    track.add_segment(Box::new(adapter));
+                }
+                Box::new(FinishLine::new(gate_width, 5.0, 1.5, last_exit.clone()))
+            }
             other => {
                 eprintln!("Unknown segment type: '{}', using StraightTube", other);
                 Box::new(StraightTube::new(8.0, current_radius, last_exit.clone()))
             }
         };
 
-        last_exit = segment.exit_ports()[0].clone();
+        // Update last_exit (FinishLine has no exits, so check first)
+        let exits = segment.exit_ports();
+        if !exits.is_empty() {
+            last_exit = exits[0].clone();
+        }
         track.add_segment(segment);
     }
 
