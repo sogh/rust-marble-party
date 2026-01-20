@@ -440,21 +440,10 @@ fn marble_physics(
             let penetration = penetration.min(max_penetration);
 
             if penetration > 0.0 {
-                // Use previous segment's gradient during transition buffer period
-                // This prevents the "lip" effect at segment junctions
-                const TRANSITION_BUFFER: f32 = 2.0;
-
-                let gradient_segment = if marble.transition_distance < TRANSITION_BUFFER
-                    && marble.previous_segment >= 0
-                    && marble.previous_segment != marble.current_segment
-                {
-                    marble.previous_segment
-                } else {
-                    marble.current_segment
-                };
-
-                let normal = if gradient_segment >= 0 {
-                    track.segment_gradient(gradient_segment as usize, next_pos)
+                // Use current segment for gradient calculation
+                // Previous segment rejects points past its exit, so we can't use it
+                let normal = if marble.current_segment >= 0 {
+                    track.segment_gradient(marble.current_segment as usize, next_pos)
                 } else {
                     track.sdf_gradient(next_pos)
                 };
