@@ -13,7 +13,7 @@ use track::{Track, Port, PortProfile, StraightTube, CurvedTube, FlatSlope, Narro
 const GRAVITY: Vec3 = Vec3::new(0.0, -20.0, 0.0);
 const MARBLE_RADIUS: f32 = 0.2;
 const TRACK_RADIUS: f32 = 1.0;
-const RESTITUTION: f32 = 0.3;  // Lower bounce for smoother rolling
+const RESTITUTION: f32 = 0.05;  // Very low bounce for slope rolling (prevents bouncing off)
 const MARBLE_RESTITUTION: f32 = 0.9;
 const FRICTION: f32 = 0.998;  // Higher friction for smoother curves
 
@@ -403,9 +403,9 @@ fn marble_physics(
         let speed = marble.velocity.length();
         let expected_displacement = speed * dt;
 
-        // Maximum distance per substep = 50% of marble radius
-        // This ensures we can't skip over walls thinner than the marble
-        let max_step_distance = marble.radius * 0.5;
+        // Maximum distance per substep = 25% of marble radius
+        // Smaller steps ensure smoother rolling on slopes
+        let max_step_distance = marble.radius * 0.25;
 
         // Calculate number of substeps needed (minimum 1)
         let num_substeps = if expected_displacement > max_step_distance {
@@ -465,15 +465,28 @@ fn marble_physics(
                     red_marble_debug.collision_normal = normal;
                 }
 
-                // Resolve penetration (capped to prevent explosions)
-                let corrected_pos = next_pos + normal * penetration;
+                // Push marble out, but leave it slightly embedded to maintain contact
+                // This prevents the marble from "bouncing" between in/out of contact
+                // Larger value (0.015) helps maintain stable contact on slopes
+                const EMBED_DEPTH: f32 = 0.015;
+                let push_amount = (penetration - EMBED_DEPTH).max(0.0);
+                let corrected_pos = next_pos + normal * push_amount;
 
                 // Decompose velocity
-                let vel_normal = normal * marble.velocity.dot(normal);
+                let vel_normal_component = marble.velocity.dot(normal);
+                let vel_normal = normal * vel_normal_component;
                 let vel_tangent = marble.velocity - vel_normal;
 
-                // Apply friction and restitution
-                marble.velocity = vel_tangent * FRICTION - vel_normal * RESTITUTION;
+                // Apply friction to tangent, restitution to normal (only if moving into surface)
+                if vel_normal_component < 0.0 {
+                    // Moving into surface - apply bounce
+                    marble.velocity = vel_tangent * FRICTION - vel_normal * RESTITUTION;
+                } else {
+                    // Moving away or parallel - just apply friction, remove normal component
+                    // to prevent marble from "launching" off the surface
+                    marble.velocity = vel_tangent * FRICTION;
+                }
+
                 marble.physics_position = corrected_pos;
             } else {
                 marble.physics_position = next_pos;

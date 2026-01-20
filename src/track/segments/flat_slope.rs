@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::log::info;
 use crate::track::{Port, PortProfile, AABB, Segment};
 
 /// A flat angled slope with side walls (like a trough or gutter)
@@ -111,6 +112,12 @@ impl FlatSlope {
         ];
         let bounds = AABB::from_points(&all_corners, 0.5);
 
+        // Log segment geometry for debugging
+        let horizontal_len = (exit_pos - entry_port.position).length();
+        info!("FlatSlope created: entry=({:.1},{:.1},{:.1}) exit=({:.1},{:.1},{:.1}) h_len={:.2}",
+            entry_port.position.x, entry_port.position.y, entry_port.position.z,
+            exit_pos.x, exit_pos.y, exit_pos.z, horizontal_len);
+
         Self {
             length,
             width,
@@ -138,8 +145,9 @@ impl FlatSlope {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-/// Experiment: one marble diameter (0.4)
-const OVERLAP_DISTANCE: f32 = 0.4;
+/// At 10 units/sec and 60fps, marble moves ~0.17 units/frame, but we need
+/// enough overlap to cover high-speed transitions between segments
+const OVERLAP_DISTANCE: f32 = 2.5;
 
 impl Segment for FlatSlope {
     fn sdf(&self, point: Vec3) -> f32 {
@@ -147,37 +155,41 @@ impl Segment for FlatSlope {
         let entry_pos = self.entry.position;
         let exit_pos = self.exit.position;
         let slope_vec = exit_pos - entry_pos;
-        let slope_length = slope_vec.length();
-        let slope_dir = slope_vec.normalize();
 
-        // Project point relative to entry
-        let local = point - entry_pos;
-        let along = local.dot(slope_dir);
+        // Use HORIZONTAL distance for position along slope
+        // This prevents vertical marble movement from affecting floor_y calculation
+        let horizontal_vec = Vec3::new(slope_vec.x, 0.0, slope_vec.z);
+        let horizontal_length = horizontal_vec.length();
+        let horizontal_dir = if horizontal_length > 0.01 {
+            horizontal_vec / horizontal_length
+        } else {
+            Vec3::NEG_Z
+        };
 
-        // Reject points outside the segment bounds
-        // For FlatSlope, NO overlap at entry - marble drops onto the trough
-        // Small overlap at exit for transition to next segment
-        if along < 0.0 || along > slope_length + OVERLAP_DISTANCE {
+        // Project point horizontally relative to entry
+        let local_xz = Vec3::new(point.x - entry_pos.x, 0.0, point.z - entry_pos.z);
+        let along_horizontal = local_xz.dot(horizontal_dir);
+
+        // Entry overlap: accept points before entry (previous segment's territory)
+        // NO exit overlap: reject points past exit (let next segment handle them)
+        // This ensures only ONE segment is authoritative for floor height at any point
+        if along_horizontal < -OVERLAP_DISTANCE || along_horizontal > horizontal_length {
             return f32::MAX;
         }
 
-        // Horizontal direction (project slope onto XZ plane)
-        let horizontal_dir = Vec3::new(slope_vec.x, 0.0, slope_vec.z).normalize_or_zero();
-        let right = if horizontal_dir.length_squared() > 0.01 {
-            horizontal_dir.cross(Vec3::Y).normalize_or_zero()
-        } else {
-            self.entry.direction.cross(Vec3::Y).normalize_or_zero()
-        };
+        // Right vector (perpendicular to forward in XZ plane)
+        let right = horizontal_dir.cross(Vec3::Y).normalize_or_zero();
 
-        // Clamp t to [0,1] for closest point calculation
-        let t = (along / slope_length).clamp(0.0, 1.0);
-        let closest_on_line = entry_pos + slope_vec * t;
+        // Calculate t based on horizontal position only
+        let t = (along_horizontal / horizontal_length).clamp(0.0, 1.0);
+
+        // Floor Y is interpolated based on horizontal position
+        let floor_y = entry_pos.y + (exit_pos.y - entry_pos.y) * t;
 
         // Distance across (perpendicular to slope in XZ plane)
-        let across = local.dot(right);
+        let across = local_xz.dot(right);
 
         // Height above the floor at this point
-        let floor_y = closest_on_line.y;
         let height_above_floor = point.y - floor_y;
 
         // Distance to walls

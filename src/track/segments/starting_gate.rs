@@ -190,8 +190,9 @@ impl StartingGate {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-/// Experiment: one marble diameter (0.4)
-const OVERLAP_DISTANCE: f32 = 0.4;
+/// At 10 units/sec and 60fps, marble moves ~0.17 units/frame, but logging is 4Hz (0.25s)
+/// so we need enough overlap to cover high-speed transitions
+const OVERLAP_DISTANCE: f32 = 2.5;
 
 impl Segment for StartingGate {
     fn sdf(&self, point: Vec3) -> f32 {
@@ -199,34 +200,39 @@ impl Segment for StartingGate {
         let entry_pos = self.entry.position;
         let exit_pos = self.exit.position;
         let slope_vec = exit_pos - entry_pos;
-        let slope_length = slope_vec.length();
-        let slope_dir = slope_vec.normalize();
 
-        // Project point onto slope direction
-        let local = point - entry_pos;
-        let along = local.dot(slope_dir);
+        // Use HORIZONTAL distance for position along slope
+        // This prevents vertical marble movement from affecting floor_y calculation
+        let horizontal_vec = Vec3::new(slope_vec.x, 0.0, slope_vec.z);
+        let horizontal_length = horizontal_vec.length();
+        let horizontal_dir = if horizontal_length > 0.01 {
+            horizontal_vec / horizontal_length
+        } else {
+            Vec3::NEG_Z
+        };
 
-        // Reject points too far behind or past exit
-        // Very minimal overlap at exit - marbles fall off the edge into funnel
-        if along < -0.5 || along > slope_length + OVERLAP_DISTANCE {
+        // Project point horizontally relative to entry
+        let local_xz = Vec3::new(point.x - entry_pos.x, 0.0, point.z - entry_pos.z);
+        let along_horizontal = local_xz.dot(horizontal_dir);
+
+        // Entry: small overlap for back wall
+        // NO exit overlap: reject points past exit (let next segment handle them)
+        // This ensures only ONE segment is authoritative for floor height at any point
+        if along_horizontal < -0.5 || along_horizontal > horizontal_length {
             return f32::MAX;
         }
 
-        // Get right vector
-        let horizontal_dir = Vec3::new(slope_vec.x, 0.0, slope_vec.z).normalize_or_zero();
-        let right = if horizontal_dir.length_squared() > 0.01 {
-            horizontal_dir.cross(Vec3::Y).normalize_or_zero()
-        } else {
-            self.entry.direction.cross(Vec3::Y).normalize_or_zero()
-        };
+        // Right vector (perpendicular to forward in XZ plane)
+        let right = horizontal_dir.cross(Vec3::Y).normalize_or_zero();
 
-        // Clamp along for floor height calculation
-        let t = (along / slope_length).clamp(0.0, 1.0);
-        let floor_point = entry_pos + slope_vec * t;
-        let floor_y = floor_point.y;
+        // Calculate t based on horizontal position only
+        let t = (along_horizontal / horizontal_length).clamp(0.0, 1.0);
+
+        // Floor Y is interpolated based on horizontal position
+        let floor_y = entry_pos.y + (exit_pos.y - entry_pos.y) * t;
 
         // Lateral position
-        let across = local.dot(right);
+        let across = local_xz.dot(right);
         let half_width = self.width / 2.0;
 
         // Height above floor
@@ -236,18 +242,7 @@ impl Segment for StartingGate {
         let dist_to_floor = height_above_floor;
         let dist_to_left_wall = across + half_width;
         let dist_to_right_wall = half_width - across;
-        let dist_to_back_wall = along + 0.1; // Small buffer at back
-
-        // PAST THE EXIT: Only provide floor collision (no walls)
-        // This allows marbles to roll off the edge cleanly
-        if along > slope_length {
-            // Only floor matters past exit - marbles are falling
-            if dist_to_floor < 0.0 {
-                return dist_to_floor;
-            }
-            // Above floor = no collision from gate
-            return f32::MAX;
-        }
+        let dist_to_back_wall = along_horizontal + 0.1; // Small buffer at back
 
         // Below floor
         if dist_to_floor < 0.0 {
@@ -263,7 +258,7 @@ impl Segment for StartingGate {
         }
 
         // Behind back wall
-        if along < 0.0 && dist_to_back_wall < 0.0 {
+        if along_horizontal < 0.0 && dist_to_back_wall < 0.0 {
             return dist_to_back_wall;
         }
 
@@ -280,7 +275,7 @@ impl Segment for StartingGate {
         min_dist = min_dist.min(dist_to_right_wall);
 
         // Back wall only counts if we're near it
-        if along < 1.0 {
+        if along_horizontal < 1.0 {
             min_dist = min_dist.min(dist_to_back_wall);
         }
 

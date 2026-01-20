@@ -140,7 +140,7 @@ impl FinishLine {
 }
 
 /// How far to extend the SDF past segment entry for smooth blending
-const OVERLAP_DISTANCE: f32 = 0.4;
+const OVERLAP_DISTANCE: f32 = 2.5;
 
 impl Segment for FinishLine {
     fn sdf(&self, point: Vec3) -> f32 {

@@ -23,7 +23,9 @@
       "Bash(RUST_LOG=info timeout:*)",
       "Bash(for i in 1 2 3 4 5)",
       "Bash(do RUST_LOG=info timeout 3 target/release/marble_party.exe)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(RUST_LOG=trace timeout 3 target/release/marble_party.exe:*)",
+      "Bash(do echo \"=== Run $i ===\")"
     ]
   }
 }

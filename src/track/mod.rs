@@ -524,29 +524,42 @@ impl Track {
             return f32::MAX;
         }
 
-        let hint = segment_hint.max(0) as usize;
-        let mut best_dist = f32::NEG_INFINITY;
+        let hint = (segment_hint.max(0) as usize).min(self.segments.len() - 1);
 
-        // Only check current segment and neighbors
-        let start = hint.saturating_sub(1);
-        let end = (hint + 2).min(self.segments.len());
+        // Check current, previous, and next segments
+        // Use MIN of all accepting segments to get the most constraining floor
+        // This ensures smooth transitions at segment boundaries
+        let curr_dist = self.segments[hint].sdf(point);
 
-        for i in start..end {
-            let dist = self.segments[i].sdf(point);
-            // Use MAX for union of tubes - marble is inside if inside ANY tube
-            // Skip f32::MAX which indicates the segment rejected this point
-            if dist < f32::MAX * 0.5 {
-                best_dist = best_dist.max(dist);
-            }
+        let prev_dist = if hint > 0 {
+            self.segments[hint - 1].sdf(point)
+        } else {
+            f32::MAX
+        };
+
+        let next_dist = if hint + 1 < self.segments.len() {
+            self.segments[hint + 1].sdf(point)
+        } else {
+            f32::MAX
+        };
+
+        // Take MIN of all segments that accept the point
+        let mut best = f32::MAX;
+        if curr_dist < f32::MAX * 0.5 {
+            best = best.min(curr_dist);
+        }
+        if prev_dist < f32::MAX * 0.5 {
+            best = best.min(prev_dist);
+        }
+        if next_dist < f32::MAX * 0.5 {
+            best = best.min(next_dist);
         }
 
-        // If no segment accepted the point, return a large positive (free space, no collision)
-        // This allows marbles to fall freely between segments
-        if best_dist == f32::NEG_INFINITY {
-            return 100.0;
+        if best < f32::MAX * 0.5 {
+            return best;
         }
 
-        best_dist
+        100.0
     }
 
     /// Fast segment detection using locality (check nearby segments first)
@@ -562,7 +575,8 @@ impl Track {
             let bounds = self.segments[i].bounds();
             if bounds.expanded(1.0).contains(point) {
                 let dist = self.segments[i].sdf(point);
-                if dist > 0.0 {
+                // Must be positive AND not f32::MAX (which means segment rejected the point)
+                if dist > 0.0 && dist < f32::MAX * 0.5 {
                     return i as i32;
                 }
             }
@@ -571,7 +585,7 @@ impl Track {
         // Fallback: current segment if still valid
         if hint < self.segments.len() {
             let dist = self.segments[hint].sdf(point);
-            if dist > 0.0 {
+            if dist > 0.0 && dist < f32::MAX * 0.5 {
                 return hint as i32;
             }
         }
