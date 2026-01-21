@@ -59,24 +59,35 @@ impl FinishLine {
 
         let right = forward.cross(Vec3::Y).normalize();
 
-        // Calculate end position (completely flat - no descent)
-        let end_pos = entry_port.position + forward * length;
+        // Get the floor Y from the incoming port's profile, or fall back to position.y
+        let entry_floor_y = match &entry_port.profile {
+            PortProfile::FlatFloor { floor_y, .. } => *floor_y,
+            _ => entry_port.position.y,
+        };
 
-        // Create entry with FlatFloor profile
-        let entry_floor_y = entry_port.position.y;
+        // Calculate end position - follow forward direction at floor level
+        // The floor stays flat (no descent)
+        let end_pos = Vec3::new(
+            entry_port.position.x + forward.x * length,
+            entry_floor_y, // Keep at floor level
+            entry_port.position.z + forward.z * length,
+        );
+
+        // Create entry with FlatFloor profile at the correct floor level
         let entry_with_profile = Port::with_profile(
-            entry_port.position,
+            Vec3::new(entry_port.position.x, entry_floor_y, entry_port.position.z),
             entry_port.direction,
             entry_port.up,
             width / 2.0,
             PortProfile::flat_floor(width, entry_floor_y),
         );
 
-        // Calculate corners
+        // Calculate corners using the floor-level entry position
         let half_width = width / 2.0;
+        let entry_floor_pos = entry_with_profile.position;
         let corners = FinishLineCorners {
-            back_left: entry_port.position - right * half_width,
-            back_right: entry_port.position + right * half_width,
+            back_left: entry_floor_pos - right * half_width,
+            back_right: entry_floor_pos + right * half_width,
             front_left: end_pos - right * half_width,
             front_right: end_pos + right * half_width,
             // Front wall corners
@@ -85,8 +96,8 @@ impl FinishLine {
             wall_front_top_left: end_pos - right * half_width + Vec3::Y * wall_height,
             wall_front_top_right: end_pos + right * half_width + Vec3::Y * wall_height,
             // Side wall tops
-            wall_side_left_top: entry_port.position - right * half_width + Vec3::Y * wall_height,
-            wall_side_right_top: entry_port.position + right * half_width + Vec3::Y * wall_height,
+            wall_side_left_top: entry_floor_pos - right * half_width + Vec3::Y * wall_height,
+            wall_side_right_top: entry_floor_pos + right * half_width + Vec3::Y * wall_height,
         };
 
         // Compute bounds
