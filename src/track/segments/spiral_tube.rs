@@ -148,8 +148,8 @@ impl SpiralTube {
 }
 
 /// How far to extend the SDF past segment endpoints for smooth blending
-/// Larger overlap (1.0) to ensure smooth handoff between spiral and next segment
-const OVERLAP_DISTANCE: f32 = 1.0;
+/// Small overlap for spirals to avoid interference with consecutive spiral segments
+const OVERLAP_DISTANCE: f32 = 0.3;
 
 impl Segment for SpiralTube {
     fn sdf(&self, point: Vec3) -> f32 {
@@ -157,23 +157,26 @@ impl Segment for SpiralTube {
             return f32::MAX;
         }
 
-        // Reject points far behind the entry to avoid interference with previous segment
-        let to_point_entry = point - self.entry.position;
-        let along_entry = to_point_entry.dot(self.entry.direction);
-        if along_entry < -OVERLAP_DISTANCE {
-            return f32::MAX;
-        }
+        // For spirals, use Y-range check to avoid accepting points from adjacent spirals
+        // Entry Y is at the top, exit Y is at the bottom (spiral descends)
+        let entry_y = self.entry.position.y;
+        let exit_y = self.exit.position.y;
 
-        // Reject points far past the exit to avoid interference with next segment
-        let to_point_exit = point - self.exit.position;
-        let along_exit = to_point_exit.dot(self.exit.direction);
-        if along_exit > OVERLAP_DISTANCE {
+        // Allow some margin above entry and below exit for smooth transitions
+        // Use a small margin to avoid overlap with adjacent spiral segments
+        let margin = self.tube_radius * 1.0;
+        let max_y = entry_y + margin;
+        let min_y = exit_y - margin;
+
+        if point.y > max_y || point.y < min_y {
             return f32::MAX;
         }
 
         // Find distance to closest point on the FINITE spine polyline
-        // (Same approach as CurvedTube - don't use infinite cylinders!)
+        // Track which segment and where on it the closest point is
         let mut min_dist_sq = f32::MAX;
+        let mut closest_segment_idx = 0;
+        let mut closest_t = 0.0f32;
 
         for i in 0..self.spine.len() - 1 {
             let a = self.spine[i];
@@ -183,7 +186,11 @@ impl Segment for SpiralTube {
 
             if ab_len_sq < 0.0001 {
                 let dist_sq = (point - a).length_squared();
-                min_dist_sq = min_dist_sq.min(dist_sq);
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
+                    closest_segment_idx = i;
+                    closest_t = 0.0;
+                }
                 continue;
             }
 
@@ -193,7 +200,23 @@ impl Segment for SpiralTube {
             let closest_point = a + ab * t;
             let dist_sq = (point - closest_point).length_squared();
 
-            min_dist_sq = min_dist_sq.min(dist_sq);
+            if dist_sq < min_dist_sq {
+                min_dist_sq = dist_sq;
+                closest_segment_idx = i;
+                closest_t = t;
+            }
+        }
+
+        // Additional exit check: if closest point is at end of spine,
+        // reject points past the exit position along the exit direction
+        let last_segment_idx = self.spine.len() - 2;
+        if closest_segment_idx == last_segment_idx && closest_t > 0.9 {
+            let to_point_exit = point - self.exit.position;
+            let along_exit = to_point_exit.dot(self.exit.direction);
+            // Allow small overlap for smooth transition, reject anything further
+            if along_exit > OVERLAP_DISTANCE {
+                return f32::MAX;
+            }
         }
 
         // SDF = tube_radius - distance_to_spine
